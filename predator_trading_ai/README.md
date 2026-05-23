@@ -75,6 +75,14 @@ The scanner persists runtime state in `state/runtime_state.json`:
 
 The main loop records heartbeat data, writes health events to SQLite, retries transient API failures, and trips safe mode after repeated failures. Safe mode blocks signal scanning and sends a system alert when Telegram is configured.
 
+## Institutional Watchlist
+
+The default monitoring universe is now a curated 50-name institutional watchlist across Technology, Financials, Healthcare, Consumer, Industrials/Energy, and Real Estate. Metadata lives in `utils/watchlist.py`, including sector mapping and correlation groups used by the risk engine.
+
+The strategy engine is intentionally selective. It favors bull-market continuation setups with EMA50/EMA200 alignment, relative volume confirmation, controlled volatility, non-extended entries, breadth confirmation, and regime alignment. This is designed to reduce trade frequency and reject weak setups rather than maximize alerts.
+
+Risk controls include sector caps and correlation-group caps, so crowded exposure such as multiple AI semiconductor names cannot stack unchecked.
+
 ## Live Monitoring
 
 Monitoring mode does not execute trades. It scans during regular US market hours only, from 9:30 AM to 4:00 PM ET, every 5 minutes by default.
@@ -100,6 +108,47 @@ python -m predator_trading_ai.main --once
 ```
 
 The scanner uses Alpaca first and falls back to yfinance when broker market data is unavailable. Telegram alerts are sent only when a new signal is not on cooldown.
+
+## Forward Testing And Shadow Mode
+
+Forward testing is monitoring-only. It does not place live or paper orders. It scans the full watchlist, sends Telegram only for accepted high-quality signals, and logs rejected setups for later filter-effectiveness analysis.
+
+Run continuously during market hours:
+
+```bash
+python -m predator_trading_ai.run_forward_test
+```
+
+Run one scheduler pass:
+
+```bash
+python -m predator_trading_ai.run_forward_test --once
+```
+
+Build today's summary:
+
+```bash
+python -m predator_trading_ai.run_forward_test --summary
+```
+
+Suppress Telegram while testing:
+
+```bash
+python -m predator_trading_ai.run_forward_test --once --no-telegram
+```
+
+Shadow mode records:
+
+- accepted signals
+- rejected signals
+- rejection stage and reason
+- regime state
+- score
+- volume, trend, volatility, and correlation conditions
+- price at decision time
+- later target/stop outcome when enough future bars are available
+
+Use this before paper trading to answer the important question: are filters improving quality, or are they rejecting trades that would have worked?
 
 ## Backtest Safety
 

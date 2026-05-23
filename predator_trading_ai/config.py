@@ -3,6 +3,8 @@ from dataclasses import dataclass, fields
 from functools import lru_cache
 from typing import Optional, get_args, get_origin
 
+from predator_trading_ai.utils.watchlist import DEFAULT_WATCHLIST
+
 
 def _load_dotenv(path: str = ".env") -> None:
     paths = [path, "predator_trading_ai/.env"]
@@ -75,7 +77,7 @@ try:
         min_liquidity_score: int = Field(default=60, ge=0, le=100)
         max_spread_pct: float = Field(default=2.0, gt=0, le=25)
         min_risk_reward: float = Field(default=1.5, gt=0)
-        watchlist: str = "SPY,QQQ"
+        watchlist: str = DEFAULT_WATCHLIST
         loop_interval_seconds: int = Field(default=300, ge=30)
         paper_account_equity: float = Field(default=100_000.0, gt=0)
         retry_attempts: int = Field(default=3, ge=1, le=10)
@@ -88,6 +90,11 @@ try:
         partial_fill_probability: float = Field(default=0.05, ge=0, le=1)
         partial_fill_fraction: float = Field(default=0.5, gt=0, le=1)
         signal_cooldown_seconds: int = Field(default=1800, ge=0)
+        institutional_min_score: float = Field(default=72.0, ge=0, le=100)
+        bull_regime_min_score: float = Field(default=70.0, ge=0, le=100)
+        neutral_regime_min_score: float = Field(default=78.0, ge=0, le=100)
+        max_sector_positions: int = Field(default=3, ge=1)
+        max_correlation_group_positions: int = Field(default=2, ge=1)
 
         @field_validator("live_trading")
         @classmethod
@@ -137,7 +144,7 @@ except ModuleNotFoundError:
         min_liquidity_score: int = 60
         max_spread_pct: float = 2.0
         min_risk_reward: float = 1.5
-        watchlist: str = "SPY,QQQ"
+        watchlist: str = DEFAULT_WATCHLIST
         loop_interval_seconds: int = 300
         paper_account_equity: float = 100_000.0
         retry_attempts: int = 3
@@ -150,6 +157,11 @@ except ModuleNotFoundError:
         partial_fill_probability: float = 0.05
         partial_fill_fraction: float = 0.5
         signal_cooldown_seconds: int = 1800
+        institutional_min_score: float = 72.0
+        bull_regime_min_score: float = 70.0
+        neutral_regime_min_score: float = 78.0
+        max_sector_positions: int = 3
+        max_correlation_group_positions: int = 2
 
         def __post_init__(self) -> None:
             _load_dotenv()

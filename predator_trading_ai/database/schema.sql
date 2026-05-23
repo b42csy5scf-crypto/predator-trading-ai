@@ -143,3 +143,59 @@ CREATE TABLE IF NOT EXISTS health_events (
     status TEXT NOT NULL,
     message TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS shadow_signals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    ticker TEXT NOT NULL,
+    status TEXT NOT NULL,
+    direction TEXT,
+    setup_type TEXT,
+    rejection_stage TEXT,
+    rejection_reason TEXT,
+    regime TEXT NOT NULL,
+    regime_reason TEXT NOT NULL,
+    score REAL,
+    price REAL,
+    entry_price REAL,
+    target_price REAL,
+    stop_loss REAL,
+    volume_condition TEXT NOT NULL,
+    trend_condition TEXT NOT NULL,
+    volatility_condition TEXT NOT NULL,
+    correlation_condition TEXT NOT NULL,
+    liquidity_score REAL,
+    risk_reward REAL,
+    outcome TEXT NOT NULL DEFAULT 'pending',
+    outcome_checked_at TEXT,
+    outcome_r REAL
+);
+
+CREATE TABLE IF NOT EXISTS rejected_signals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    shadow_signal_id INTEGER,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    ticker TEXT NOT NULL,
+    rejection_stage TEXT NOT NULL,
+    rejection_reason TEXT NOT NULL,
+    regime TEXT NOT NULL,
+    score REAL,
+    price REAL,
+    would_have_won INTEGER,
+    outcome TEXT NOT NULL DEFAULT 'pending',
+    outcome_checked_at TEXT,
+    FOREIGN KEY(shadow_signal_id) REFERENCES shadow_signals(id)
+);
+
+CREATE TABLE IF NOT EXISTS forward_test_results (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    period TEXT NOT NULL,
+    accepted_signals INTEGER NOT NULL,
+    rejected_signals INTEGER NOT NULL,
+    accepted_wins INTEGER NOT NULL DEFAULT 0,
+    accepted_losses INTEGER NOT NULL DEFAULT 0,
+    rejected_would_have_won INTEGER NOT NULL DEFAULT 0,
+    top_rejection_reasons TEXT NOT NULL,
+    notes TEXT
+);

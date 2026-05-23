@@ -18,6 +18,12 @@ from predator_trading_ai.state.runtime_state import RuntimeState, RuntimeStateSt
 from predator_trading_ai.utils.logger import setup_logger
 from predator_trading_ai.utils.reliability import CircuitBreaker, HealthMonitor, RetryPolicy
 from predator_trading_ai.utils.validators import clamp, spread_pct
+from predator_trading_ai.utils.watchlist import (
+    CORRELATION_GROUP_BY_TICKER,
+    SECTOR_BY_TICKER,
+    parse_watchlist,
+    validate_watchlist,
+)
 
 
 EASTERN = ZoneInfo("America/New_York")
@@ -46,11 +52,10 @@ class PredatorTradingAI:
         self.circuit_breaker = CircuitBreaker(self.settings.watchdog_max_failures)
         self.state_store = RuntimeStateStore()
         self.state: RuntimeState = self.state_store.load()
-        self.watchlist = [
-            ticker.strip().upper()
-            for ticker in self.settings.watchlist.split(",")
-            if ticker.strip()
-        ]
+        self.watchlist = parse_watchlist(self.settings.watchlist)
+        watchlist_issues = validate_watchlist(self.watchlist)
+        if watchlist_issues:
+            self.logger.warning("Watchlist validation issues: %s", "; ".join(watchlist_issues))
 
     def run(self, run_once: bool = False) -> None:
         self.db.initialize()
@@ -123,6 +128,7 @@ class PredatorTradingAI:
 
     def run_iteration(self) -> None:
         self.logger.info("Starting market data iteration for %d tickers.", len(self.watchlist))
+        self.market_context = self.load_market_context()
         had_failure = False
         for ticker in self.watchlist:
             try:
@@ -162,7 +168,13 @@ class PredatorTradingAI:
             lambda: self.market_data.get_latest_snapshot(ticker),
             fallback=None,
         )
-        regime = self.regime_detector.detect(bars)
+        regime = self.regime_detector.detect(
+            bars,
+            spy_bars=self.market_context.get("SPY"),
+            qqq_bars=self.market_context.get("QQQ"),
+            vix_level=self.market_context.get("VIX"),
+            breadth_score=self.market_context.get("breadth_score"),
+        )
         self.log_regime(ticker, regime)
         if snapshot is None:
             self.logger.warning("Skipping %s signal generation: latest quote/trade snapshot missing.", ticker)
@@ -201,11 +213,60 @@ class PredatorTradingAI:
             "setup_type": setup.setup_type,
             "direction": setup.direction,
             "confidence": signal.confidence,
+            "sector": SECTOR_BY_TICKER.get(ticker),
+            "correlation_group": CORRELATION_GROUP_BY_TICKER.get(ticker),
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
         self.state.last_telegram_alert = signal_key
         self.state_store.set_cooldown(self.state, signal_key)
         asyncio.run(self.telegram_bot.send_signal(signal))
+
+    def load_market_context(self) -> dict:
+        context: dict = {}
+        for ticker in ("SPY", "QQQ"):
+            bars = self.retry.run(
+                f"benchmark bars {ticker}",
+                lambda ticker=ticker: self.market_data.get_recent_bars(ticker, lookback_days=10, timeframe="5Min"),
+                fallback=None,
+            )
+            if bars is not None and not bars.empty:
+                context[ticker] = bars
+        vix_bars = self.retry.run(
+            "VIX bars",
+            lambda: self.market_data.get_recent_bars("^VIX", lookback_days=10, timeframe="5Min"),
+            fallback=None,
+        )
+        if vix_bars is not None and not vix_bars.empty:
+            context["VIX"] = float(vix_bars.iloc[-1]["close"])
+        context["breadth_score"] = self.market_breadth_proxy(context.get("SPY"), context.get("QQQ"))
+        self.logger.info(
+            "Market context: SPY=%s QQQ=%s VIX=%s breadth=%.0f",
+            "ok" if "SPY" in context else "missing",
+            "ok" if "QQQ" in context else "missing",
+            f"{context['VIX']:.1f}" if "VIX" in context else "missing",
+            context["breadth_score"],
+        )
+        return context
+
+    @staticmethod
+    def market_breadth_proxy(spy_bars, qqq_bars) -> float:
+        scores = []
+        for bars in (spy_bars, qqq_bars):
+            if bars is None or bars.empty:
+                continue
+            latest = bars.iloc[-1]
+            close = float(latest["close"])
+            ema_21 = float(latest.get("ema_21", close))
+            ema_50 = float(latest.get("ema_50", close))
+            score = 50
+            if close > ema_21:
+                score += 20
+            if close > ema_50:
+                score += 20
+            if float(latest.get("return_20", 0) or 0) > 0:
+                score += 10
+            scores.append(score)
+        return sum(scores) / len(scores) if scores else 50.0
 
     def get_options_confirmation(self, ticker: str) -> Optional[dict]:
         events = self.retry.run(
@@ -240,6 +301,8 @@ class PredatorTradingAI:
             daily_loss_pct=self.daily_loss_pct(),
             liquidity_score=liquidity_score,
             market_is_safe=regime.is_safe,
+            ticker=setup.ticker,
+            active_positions={**self.state.active_positions, **self.state.active_signals},
         )
 
     def log_regime(self, ticker: str, regime: MarketRegime) -> None:

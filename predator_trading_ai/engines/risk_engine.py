@@ -3,6 +3,7 @@ from typing import Optional
 
 from predator_trading_ai.config import Settings, get_settings
 from predator_trading_ai.engines.strategy_engine import StrategySetup
+from predator_trading_ai.utils.watchlist import CORRELATION_GROUP_BY_TICKER, SECTOR_BY_TICKER
 from predator_trading_ai.utils.validators import spread_pct
 
 
@@ -29,6 +30,8 @@ class RiskEngine:
         daily_loss_pct: float,
         liquidity_score: float,
         market_is_safe: bool,
+        ticker: Optional[str] = None,
+        active_positions: Optional[dict] = None,
     ) -> RiskDecision:
         reasons: list[str] = []
         entry = (setup.entry_zone_low + setup.entry_zone_high) / 2
@@ -55,6 +58,7 @@ class RiskEngine:
             reasons.append(f"risk/reward too low: {risk_reward:.2f}")
         if not market_is_safe:
             reasons.append("market regime is unsafe")
+        reasons.extend(self._correlation_rejections(ticker or setup.ticker, active_positions or {}))
 
         risk_budget = account_equity * (self.settings.max_risk_per_trade_pct / 100)
         position_size = risk_budget / risk_per_share if risk_per_share > 0 else 0
@@ -66,3 +70,27 @@ class RiskEngine:
             reasons=reasons,
         )
 
+    def _correlation_rejections(self, ticker: str, active_positions: dict) -> list[str]:
+        ticker = ticker.upper()
+        sector = SECTOR_BY_TICKER.get(ticker)
+        group = CORRELATION_GROUP_BY_TICKER.get(ticker)
+        if not sector and not group:
+            return []
+
+        sector_count = 0
+        group_count = 0
+        for payload in active_positions.values():
+            existing = str(payload.get("ticker", "")).upper()
+            existing_sector = payload.get("sector") or SECTOR_BY_TICKER.get(existing)
+            existing_group = payload.get("correlation_group") or CORRELATION_GROUP_BY_TICKER.get(existing)
+            if sector and existing_sector == sector:
+                sector_count += 1
+            if group and existing_group == group:
+                group_count += 1
+
+        rejections = []
+        if sector and sector_count >= self.settings.max_sector_positions:
+            rejections.append(f"sector exposure cap reached for {sector}")
+        if group and group_count >= self.settings.max_correlation_group_positions:
+            rejections.append(f"correlation group cap reached for {group}")
+        return rejections

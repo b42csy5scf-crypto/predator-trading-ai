@@ -115,13 +115,20 @@ class MarketDataClient:
         df["vwap"] = (typical * df["volume"]).cumsum() / df["volume"].replace(0, np.nan).cumsum()
         df["ema_9"] = df["close"].ewm(span=9, adjust=False).mean()
         df["ema_21"] = df["close"].ewm(span=21, adjust=False).mean()
+        df["ema_50"] = df["close"].ewm(span=50, adjust=False).mean()
+        df["ema_200"] = df["close"].ewm(span=200, adjust=False).mean()
         df["rsi_14"] = self._rsi(df["close"], 14)
         df["atr_14"] = self._atr(df, 14)
+        df["atr_pct"] = df["atr_14"] / df["close"].replace(0, np.nan) * 100
         ema_12 = df["close"].ewm(span=12, adjust=False).mean()
         ema_26 = df["close"].ewm(span=26, adjust=False).mean()
         df["macd"] = ema_12 - ema_26
         df["macd_signal"] = df["macd"].ewm(span=9, adjust=False).mean()
         df["volume_sma_20"] = df["volume"].rolling(20, min_periods=1).mean()
+        df["relative_volume"] = df["volume"] / df["volume_sma_20"].replace(0, np.nan)
+        df["high_20"] = df["high"].rolling(20, min_periods=1).max()
+        df["low_20"] = df["low"].rolling(20, min_periods=1).min()
+        df["return_20"] = df["close"].pct_change(20) * 100
         return df
 
     def _get_polygon_bars(
