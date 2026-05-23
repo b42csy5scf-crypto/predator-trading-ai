@@ -1,0 +1,11 @@
+{
+  "active_positions": {},
+  "active_signals": {},
+  "consecutive_failures": 0,
+  "cooldowns": {},
+  "last_scan_time": "2026-05-22T19:58:11.866216+00:00",
+  "last_telegram_alert": null,
+  "safe_mode": false,
+  "safe_mode_reason": null,
+  "strategy_states": {}
+}
