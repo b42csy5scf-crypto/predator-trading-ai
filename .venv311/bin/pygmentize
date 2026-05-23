@@ -1,0 +1,6 @@
+#!/Users/apple/Documents/Codex/2026-05-19/build-a-complete-ai-assisted-trading/.venv311/bin/python3.11
+import sys
+from pygments.cmdline import main
+if __name__ == '__main__':
+    sys.argv[0] = sys.argv[0].removesuffix('.exe')
+    sys.exit(main())

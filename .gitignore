@@ -1,0 +1,11 @@
+.DS_Store
+__pycache__/
+*.pyc
+.pytest_cache/
+
+predator_trading_ai/.env
+predator_trading_ai/.venv/
+predator_trading_ai.db
+predator_trading_ai/state/runtime_state.json
+predator_trading_ai/state/*.corrupt.json
+

@@ -1,0 +1,6 @@
+2026-05-22 03:14:05,803 | INFO | predator_trading_ai.database.db | SQLite schema initialized at predator_trading_ai.db
+2026-05-22 03:14:05,803 | INFO | predator_trading_ai | Predator Trading AI started. Live trading enabled: False
+2026-05-22 03:14:05,803 | INFO | predator_trading_ai | Watchlist: SPY, QQQ
+2026-05-22 03:14:05,803 | INFO | predator_trading_ai | Loop interval: 300 seconds
+2026-05-22 03:14:05,808 | INFO | predator_trading_ai | Heartbeat UTC: 2026-05-22T00:14:05.806396+00:00
+2026-05-22 03:14:05,809 | INFO | predator_trading_ai | Market is closed at 2026-05-21 20:14:05 ET. Next check in 47754 seconds.

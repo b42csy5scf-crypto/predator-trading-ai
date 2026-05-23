@@ -1,0 +1,2 @@
+"""Predator Trading AI package."""
+

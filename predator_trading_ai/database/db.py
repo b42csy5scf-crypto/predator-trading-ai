@@ -1,0 +1,67 @@
+import json
+import sqlite3
+from pathlib import Path
+from typing import Any, Iterable, Optional
+
+from predator_trading_ai.config import Settings, get_settings
+from predator_trading_ai.utils.logger import setup_logger
+
+
+class Database:
+    def __init__(self, settings: Optional[Settings] = None) -> None:
+        self.settings = settings or get_settings()
+        self.logger = setup_logger(__name__, self.settings.log_level)
+        self.path = Path(self.settings.sqlite_path)
+
+    def connect(self) -> sqlite3.Connection:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(self.path)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys=ON")
+        return conn
+
+    def initialize(self) -> None:
+        schema_path = Path(__file__).with_name("schema.sql")
+        with self.connect() as conn:
+            conn.executescript(schema_path.read_text(encoding="utf-8"))
+        self.logger.info("SQLite schema initialized at %s", self.path)
+
+    def execute(self, sql: str, params: Iterable[Any] = ()) -> int:
+        with self.connect() as conn:
+            cursor = conn.execute(sql, tuple(params))
+            conn.commit()
+            return int(cursor.lastrowid)
+
+    def fetch_all(self, sql: str, params: Iterable[Any] = ()) -> list[sqlite3.Row]:
+        with self.connect() as conn:
+            return list(conn.execute(sql, tuple(params)).fetchall())
+
+    def insert_dict(self, table: str, payload: dict[str, Any]) -> int:
+        columns = list(payload)
+        values = [self._serialize(payload[column]) for column in columns]
+        placeholders = ", ".join(["?"] * len(columns))
+        column_sql = ", ".join(columns)
+        return self.execute(
+            f"INSERT INTO {table} ({column_sql}) VALUES ({placeholders})",
+            values,
+        )
+
+    def set_state(self, key: str, value: Any) -> None:
+        self.execute(
+            """
+            INSERT INTO system_state (key, value, updated_at)
+            VALUES (?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP
+            """,
+            [key, self._serialize(value)],
+        )
+
+    def get_state(self, key: str, default: Optional[Any] = None) -> Any:
+        rows = self.fetch_all("SELECT value FROM system_state WHERE key = ?", [key])
+        return rows[0]["value"] if rows else default
+
+    @staticmethod
+    def _serialize(value: Any) -> Any:
+        if isinstance(value, (dict, list, tuple)):
+            return json.dumps(value, default=str)
+        return value
