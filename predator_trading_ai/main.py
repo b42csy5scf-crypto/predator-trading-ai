@@ -12,6 +12,7 @@ from predator_trading_ai.data.options_data import OptionsFlowDetector, UnusualWh
 from predator_trading_ai.database.db import Database
 from predator_trading_ai.engines.regime_detector import MarketRegime, RegimeDetector
 from predator_trading_ai.engines.risk_engine import RiskEngine
+from predator_trading_ai.engines.shadow_mode import ShadowModeLogger
 from predator_trading_ai.engines.signal_engine import SignalEngine
 from predator_trading_ai.engines.strategy_engine import StrategyEngine, StrategySetup
 from predator_trading_ai.state.runtime_state import RuntimeState, RuntimeStateStore
@@ -43,6 +44,7 @@ class PredatorTradingAI:
         self.strategy_engine = StrategyEngine()
         self.risk_engine = RiskEngine(self.settings)
         self.signal_engine = SignalEngine(self.db)
+        self.shadow_logger = ShadowModeLogger(self.db)
         self.telegram_bot = TelegramAlertBot(self.settings, self.db)
         self.retry = RetryPolicy(
             attempts=self.settings.retry_attempts,
@@ -188,11 +190,23 @@ class PredatorTradingAI:
             options_confirmation=options_confirmation,
         )
         if setup is None:
+            self.log_rejected_or_watch(ticker, bars, regime, "strategy", "no valid strategy setup")
             self.logger.info("No valid strategy setup for %s.", ticker)
             return
 
         risk = self.evaluate_risk(setup, snapshot, regime, options_confirmation)
         if not risk.approved:
+            diagnostics = self.shadow_logger.diagnostics(ticker, bars, {**self.state.active_positions, **self.state.active_signals}, score=setup.score)
+            self.shadow_logger.log(
+                ticker,
+                "rejected",
+                regime,
+                diagnostics,
+                setup=setup,
+                risk=risk,
+                rejection_stage="risk",
+                rejection_reason="; ".join(risk.reasons),
+            )
             self.logger.info("Signal vetoed for %s: %s", ticker, "; ".join(risk.reasons))
             return
 
@@ -207,7 +221,7 @@ class PredatorTradingAI:
             self.logger.info("Signal not created for %s after risk evaluation.", ticker)
             return
 
-        self.logger.info("Signal generated for %s: %s %.0f%%", ticker, signal.setup_type, signal.confidence)
+        self.logger.info("%s generated for %s: %s %.0f%%", setup.signal_tier, ticker, signal.setup_type, signal.confidence)
         self.state.active_signals[signal_key] = {
             "ticker": ticker,
             "setup_type": setup.setup_type,
@@ -219,7 +233,36 @@ class PredatorTradingAI:
         }
         self.state.last_telegram_alert = signal_key
         self.state_store.set_cooldown(self.state, signal_key)
-        asyncio.run(self.telegram_bot.send_signal(signal))
+        asyncio.run(self.telegram_bot.send_signal(signal, label=setup.signal_tier))
+
+    def log_rejected_or_watch(self, ticker: str, bars, regime: MarketRegime, stage: str, reason: str) -> None:
+        diagnostics = self.shadow_logger.diagnostics(ticker, bars, {**self.state.active_positions, **self.state.active_signals})
+        watch = self.strategy_engine.evaluate_watch_alert(ticker, bars, regime)
+        if watch is not None:
+            diagnostics = self.shadow_logger.diagnostics(ticker, bars, {**self.state.active_positions, **self.state.active_signals}, score=watch.score)
+            self.shadow_logger.log(ticker, "watch_alert", regime, diagnostics, setup=watch)
+            self.send_watch_alert(ticker, watch, regime)
+            return
+        self.shadow_logger.log(ticker, "rejected", regime, diagnostics, rejection_stage=stage, rejection_reason=reason)
+
+    def send_watch_alert(self, ticker: str, setup: StrategySetup, regime: MarketRegime) -> None:
+        if not self.settings.enable_watchlist_alerts:
+            return
+        signal_key = self.state_store.signal_key(ticker, setup.setup_type, setup.signal_tier)
+        if self.state_store.is_on_cooldown(self.state, signal_key, self.settings.signal_cooldown_seconds):
+            return
+        message = (
+            "Predator Trading AI Watch Alert\n"
+            "Observe only - not a trade entry\n"
+            f"Ticker: {ticker}\n"
+            f"Setup: {setup.setup_type}\n"
+            f"Score: {setup.score:.0f}%\n"
+            f"Price Zone: {setup.entry_zone_low:.2f} - {setup.entry_zone_high:.2f}\n"
+            f"Regime: {regime.regime}\n"
+            f"Reason: {setup.reason}"
+        )
+        self.state_store.set_cooldown(self.state, signal_key)
+        asyncio.run(self.telegram_bot.send_message(message))
 
     def load_market_context(self) -> dict:
         context: dict = {}

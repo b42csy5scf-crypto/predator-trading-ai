@@ -52,7 +52,8 @@ class RiskEngine:
             reasons.append(f"spread too wide: {spread:.2f}%")
         if liquidity_score < self.settings.min_liquidity_score:
             reasons.append(f"liquidity score too low: {liquidity_score:.0f}")
-        if setup.score < self.settings.min_confidence:
+        min_confidence = min(self.settings.min_confidence, self.settings.min_score_a)
+        if setup.score < min_confidence:
             reasons.append(f"confidence below minimum: {setup.score:.0f}%")
         if risk_reward < self.settings.min_risk_reward:
             reasons.append(f"risk/reward too low: {risk_reward:.2f}")

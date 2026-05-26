@@ -12,8 +12,8 @@ class TelegramAlertBot:
         self.db = db or Database(self.settings)
         self.logger = setup_logger(__name__, self.settings.log_level)
 
-    async def send_signal(self, signal: TradingSignal) -> None:
-        await self.send_message(SignalEngine.format_alert(signal))
+    async def send_signal(self, signal: TradingSignal, label: str = "Signal") -> None:
+        await self.send_message(SignalEngine.format_alert(signal, label=label))
 
     async def send_message(self, text: str) -> None:
         if not self.settings.telegram_bot_token:
@@ -63,4 +63,3 @@ class TelegramAlertBot:
 
     def command_enable_paper(self) -> str:
         return "Paper trading is enabled when Alpaca paper credentials are configured."
-

@@ -69,11 +69,11 @@ class SignalEngine:
         return signal
 
     @staticmethod
-    def format_alert(signal: TradingSignal) -> str:
+    def format_alert(signal: TradingSignal, label: str = "Signal") -> str:
         expected = "n/a" if signal.expected_win_rate is None else f"{signal.expected_win_rate:.1f}%"
         conditions = "; ".join(signal.do_not_enter_conditions)
         return (
-            f"Predator Trading AI Signal\n"
+            f"Predator Trading AI {label}\n"
             f"Ticker: {signal.ticker}\n"
             f"Direction: {signal.direction}\n"
             f"Setup: {signal.setup_type}\n"
