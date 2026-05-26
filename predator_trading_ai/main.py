@@ -294,23 +294,7 @@ class PredatorTradingAI:
         alert_key = self.alert_cooldown_key(ticker, setup.signal_tier)
         if self.state_store.is_on_cooldown(self.state, alert_key, self.alert_cooldown_seconds):
             return
-        bear_warning = "Bear regime active — reduced confidence.\n" if self.is_bear_watch_regime(regime) else ""
-        message = (
-            f"Predator Trading AI {setup.signal_tier}\n"
-            "Observe only — not a trade entry.\n"
-            f"{bear_warning}"
-            f"Ticker: {ticker}\n"
-            f"Grade: {setup.signal_tier}\n"
-            f"Setup: {setup.setup_type}\n"
-            f"Score: {setup.score:.0f}%\n"
-            f"Entry Zone: {setup.entry_zone_low:.2f} - {setup.entry_zone_high:.2f}\n"
-            f"Stop / Invalidation: {setup.stop_loss:.2f}\n"
-            f"Targets: {setup.targets[0]:.2f}, {setup.targets[1]:.2f}, {setup.targets[2]:.2f}\n"
-            f"Confidence: {setup.score:.0f}%\n"
-            f"Regime: {regime.regime}\n"
-            f"Reason: {setup.reason}\n"
-            "Risk Warning: early or lower-quality setup; wait for confirmation before considering action."
-        )
+        message = SignalEngine.format_watch_alert(setup, bear_regime=self.is_bear_watch_regime(regime))
         self.log_sent_alert(ticker, setup.signal_tier, "observe_only", setup.score, setup.setup_type, regime.regime, message)
         self.state.last_telegram_alert = alert_key
         self.state_store.set_cooldown(self.state, alert_key)

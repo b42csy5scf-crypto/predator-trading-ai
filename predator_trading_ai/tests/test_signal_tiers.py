@@ -153,9 +153,49 @@ def test_signal_format_includes_tier_label() -> None:
         position_size=10,
         liquidity_score=90,
         market_regime="bull-trend",
-        reason="test",
+        reason="stacked EMA/MACD momentum, RSI 61.2, breadth confirmation 80",
         do_not_enter_conditions=[],
     )
     formatted = SignalEngine.format_alert(signal, label="A+ Signal")
-    assert "A+ Signal" in formatted.splitlines()[0]
-    assert "Grade: A+ Signal" in formatted
+    lines = formatted.splitlines()
+    assert lines[0] == "Predator Signal: A+ Signal"
+    assert "Action: Trade candidate — manual review required" in formatted
+    assert "Market Regime" not in formatted
+    assert "Do Not Enter" not in formatted
+    assert len(lines) <= 9
+
+
+def test_watch_alert_format_is_short_and_observe_only() -> None:
+    settings = Settings(enable_watchlist_alerts=True, enable_b_alerts=True, enable_c_alerts=True)
+    bars = make_bars([100 + i * 0.15 for i in range(79)] + [111.7], last_volume=2600)
+    regime = RegimeDetector().detect(bars, breadth_score=70)
+    watch = StrategyEngine(settings).evaluate_watch_alert("AAPL", bars, regime)
+    assert watch is not None
+    formatted = SignalEngine.format_watch_alert(watch)
+    lines = formatted.splitlines()
+    assert lines[0].startswith("Predator Signal:")
+    assert "Action: Observe only — not a trade entry" in formatted
+    assert "Risk Warning" not in formatted
+    assert "watch risks:" not in formatted
+    assert len(lines) <= 9
+
+
+def test_bear_watch_alert_note_is_short() -> None:
+    settings = Settings(enable_watchlist_alerts=True, enable_b_alerts=True, enable_c_alerts=True)
+    bars = make_bars([100 + i * 0.12 for i in range(80)], last_volume=3000)
+    regime = MarketRegime(
+        regime="bear",
+        volatility=1.5,
+        volume_state="normal",
+        trend_strength=0.25,
+        is_safe=False,
+        reason="Moderate bear regime: trade entries blocked",
+        risk_level="blocked",
+        breadth_score=48,
+        regime_severity="moderate",
+    )
+    result = StrategyEngine(settings).evaluate_watch_candidate("AAPL", bars, regime)
+    assert result.setup is not None
+    formatted = SignalEngine.format_watch_alert(result.setup, bear_regime=True)
+    assert "Note: Bear regime active — reduced confidence — observe only." in formatted
+    assert len(formatted.splitlines()) <= 9

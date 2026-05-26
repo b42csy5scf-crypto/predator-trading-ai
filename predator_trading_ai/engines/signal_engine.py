@@ -70,23 +70,50 @@ class SignalEngine:
 
     @staticmethod
     def format_alert(signal: TradingSignal, label: str = "Signal") -> str:
-        expected = "n/a" if signal.expected_win_rate is None else f"{signal.expected_win_rate:.1f}%"
-        conditions = "; ".join(signal.do_not_enter_conditions)
+        reason = SignalEngine.short_note(signal.reason, observe_only=False)
         return (
-            f"Predator Trading AI {label}\n"
+            f"Predator Signal: {label}\n"
             f"Ticker: {signal.ticker}\n"
-            f"Grade: {label}\n"
-            f"Direction: {signal.direction}\n"
-            f"Setup: {signal.setup_type}\n"
-            f"Entry Zone: {signal.entry_zone_low:.2f} - {signal.entry_zone_high:.2f}\n"
-            f"Targets: {signal.target_1:.2f}, {signal.target_2:.2f}, {signal.target_3:.2f}\n"
-            f"Stop / Invalidation: {signal.stop_loss:.2f}\n"
-            f"Risk/Reward: {signal.risk_reward:.2f}\n"
-            f"Confidence: {signal.confidence:.0f}%\n"
-            f"Expected Win Rate: {expected}\n"
-            f"Position Size: {signal.position_size:.2f}\n"
-            f"Liquidity Score: {signal.liquidity_score:.0f}\n"
-            f"Market Regime: {signal.market_regime}\n"
-            f"Reason: {signal.reason}\n"
-            f"Do Not Enter If: {conditions}"
+            f"Score: {signal.confidence:.0f}%\n"
+            f"Risk: {SignalEngine.risk_label(label, signal.confidence)}\n"
+            f"Action: Trade candidate — manual review required\n"
+            f"Entry: {signal.entry_zone_low:.2f} - {signal.entry_zone_high:.2f}\n"
+            f"Stop: {signal.stop_loss:.2f}\n"
+            f"TP: {signal.target_1:.2f} / {signal.target_2:.2f} / {signal.target_3:.2f}\n"
+            f"Note: {reason}"
         )
+
+    @staticmethod
+    def format_watch_alert(setup: StrategySetup, bear_regime: bool = False) -> str:
+        note = SignalEngine.short_note(setup.reason, observe_only=True, bear_regime=bear_regime)
+        return (
+            f"Predator Signal: {setup.signal_tier}\n"
+            f"Ticker: {setup.ticker}\n"
+            f"Score: {setup.score:.0f}%\n"
+            f"Risk: {SignalEngine.risk_label(setup.signal_tier, setup.score)}\n"
+            f"Action: Observe only — not a trade entry\n"
+            f"Entry: {setup.entry_zone_low:.2f} - {setup.entry_zone_high:.2f}\n"
+            f"Stop: {setup.stop_loss:.2f}\n"
+            f"TP: {setup.targets[0]:.2f} / {setup.targets[1]:.2f} / {setup.targets[2]:.2f}\n"
+            f"Note: {note}"
+        )
+
+    @staticmethod
+    def risk_label(label: str, score: float) -> str:
+        if label in {"B Watch Alert", "C Risky/Early Alert"}:
+            return "Medium / Watch only" if label == "B Watch Alert" else "High / Watch only"
+        if label == "A++ Signal" or score >= 75:
+            return "Low"
+        if label == "A+ Signal" or score >= 65:
+            return "Medium"
+        return "High"
+
+    @staticmethod
+    def short_note(reason: str, observe_only: bool, bear_regime: bool = False) -> str:
+        first = (reason or "Setup detected").split(";")[0].split(",")[0].strip()
+        if not first:
+            first = "Setup detected"
+        suffix = "observe only" if observe_only else "manual review required"
+        if bear_regime:
+            first = "Bear regime active — reduced confidence"
+        return f"{first[:90]} — {suffix}."
