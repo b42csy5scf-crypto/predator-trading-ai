@@ -79,6 +79,47 @@ def test_hard_blocked_regime_prevents_watch_alert() -> None:
     assert result.rejected_by == "regime"
 
 
+def test_moderate_bear_allows_watch_alert_but_blocks_trade_entry() -> None:
+    settings = Settings(enable_watchlist_alerts=True, enable_b_alerts=True, enable_c_alerts=True)
+    closes = [100 + i * 0.12 for i in range(80)]
+    bars = make_bars(closes, last_volume=3000)
+    regime = MarketRegime(
+        regime="bear",
+        volatility=1.5,
+        volume_state="normal",
+        trend_strength=0.25,
+        is_safe=False,
+        reason="Moderate bear regime: trade entries blocked",
+        risk_level="blocked",
+        breadth_score=48,
+        regime_severity="moderate",
+    )
+    engine = StrategyEngine(settings)
+    assert engine.evaluate("AAPL", bars, regime) is None
+    result = engine.evaluate_watch_candidate("AAPL", bars, regime)
+    assert result.setup is not None
+    assert result.setup.signal_tier in {"B Watch Alert", "C Risky/Early Alert"}
+
+
+def test_severe_bear_blocks_watch_alert() -> None:
+    settings = Settings(enable_watchlist_alerts=True, enable_c_alerts=True)
+    bars = make_bars([100 + i * 0.1 for i in range(80)], last_volume=4000)
+    regime = MarketRegime(
+        regime="bear",
+        volatility=5.5,
+        volume_state="high",
+        trend_strength=0.3,
+        is_safe=False,
+        reason="Severe bear regime",
+        risk_level="blocked",
+        breadth_score=25,
+        regime_severity="severe",
+    )
+    result = StrategyEngine(settings).evaluate_watch_candidate("AAPL", bars, regime)
+    assert result.setup is None
+    assert result.rejected_by == "regime"
+
+
 def test_grade_for_score_maps_all_tiers() -> None:
     settings = Settings(
         min_score_a_plus_plus=75,

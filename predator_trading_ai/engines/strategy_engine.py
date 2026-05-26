@@ -54,7 +54,7 @@ class StrategyEngine:
     ) -> Optional[StrategySetup]:
         if bars.empty or len(bars) < 50:
             return None
-        if self.is_hard_blocked_regime(regime) or not regime.is_safe:
+        if self.is_trade_blocked_regime(regime) or not regime.is_safe:
             return None
 
         latest = bars.iloc[-1]
@@ -136,7 +136,7 @@ class StrategyEngine:
             return WatchEvaluation(None, 0.0, "disabled", "config", "watchlist alerts disabled")
         if bars.empty or len(bars) < 30:
             return WatchEvaluation(None, 0.0, "none", "data", "insufficient bars for watch alert")
-        if self.is_hard_blocked_regime(regime):
+        if self.is_watch_hard_blocked_regime(regime):
             return WatchEvaluation(None, 0.0, "blocked", "regime", f"hard-blocked regime: {regime.regime}")
 
         latest = bars.iloc[-1]
@@ -210,6 +210,9 @@ class StrategyEngine:
         if regime.regime == "bull-trend":
             score += 5
             reasons.append("bull regime support")
+        elif regime.regime in {"bear", "bear-trend"} and regime.regime_severity in {"mild", "moderate"}:
+            score -= 8
+            soft_rejections.append(f"{regime.regime_severity} bear regime active")
         elif regime.regime in {"choppy", "low-volume", "weak-breadth"}:
             score -= 6
             soft_rejections.append(f"soft regime warning: {regime.regime}")
@@ -238,8 +241,16 @@ class StrategyEngine:
         return WatchEvaluation(setup, score, tier, "none", reason)
 
     @staticmethod
-    def is_hard_blocked_regime(regime: MarketRegime) -> bool:
+    def is_trade_blocked_regime(regime: MarketRegime) -> bool:
         return regime.regime in {"no-trade", "bear", "bear-trend", "panic", "high-volatility", "news-driven"}
+
+    @staticmethod
+    def is_watch_hard_blocked_regime(regime: MarketRegime) -> bool:
+        if regime.regime in {"no-trade", "panic", "high-volatility", "news-driven"}:
+            return True
+        if regime.regime in {"bear", "bear-trend"}:
+            return regime.regime_severity in {"severe", "panic"}
+        return False
 
     def grade_for_score(self, score: float) -> str:
         if score >= self.settings.min_score_a_plus_plus:

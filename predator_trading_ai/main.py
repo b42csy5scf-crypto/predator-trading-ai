@@ -294,9 +294,11 @@ class PredatorTradingAI:
         alert_key = self.alert_cooldown_key(ticker, setup.signal_tier)
         if self.state_store.is_on_cooldown(self.state, alert_key, self.alert_cooldown_seconds):
             return
+        bear_warning = "Bear regime active — reduced confidence.\n" if self.is_bear_watch_regime(regime) else ""
         message = (
             f"Predator Trading AI {setup.signal_tier}\n"
             "Observe only — not a trade entry.\n"
+            f"{bear_warning}"
             f"Ticker: {ticker}\n"
             f"Grade: {setup.signal_tier}\n"
             f"Setup: {setup.setup_type}\n"
@@ -313,6 +315,10 @@ class PredatorTradingAI:
         self.state.last_telegram_alert = alert_key
         self.state_store.set_cooldown(self.state, alert_key)
         asyncio.run(self.telegram_bot.send_message(message))
+
+    @staticmethod
+    def is_bear_watch_regime(regime: MarketRegime) -> bool:
+        return regime.regime in {"bear", "bear-trend"} and regime.regime_severity in {"mild", "moderate"}
 
     @property
     def alert_cooldown_seconds(self) -> int:

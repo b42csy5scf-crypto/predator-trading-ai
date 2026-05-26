@@ -17,6 +17,7 @@ class MarketRegime:
     qqq_trend: str = "unknown"
     breadth_score: float = 50.0
     vix_level: Optional[float] = None
+    regime_severity: str = "normal"
 
 
 class RegimeDetector:
@@ -54,26 +55,48 @@ class RegimeDetector:
         panic = (vix_level is not None and vix_level >= 30) or (atr_pct > 3.5 and recent_return < -4.0)
 
         if news_driven:
-            return MarketRegime("news-driven", atr_pct, volume_state, trend_strength, False, "News-driven regime", "blocked", spy_trend, qqq_trend, breadth, vix_level)
+            return MarketRegime("news-driven", atr_pct, volume_state, trend_strength, False, "News-driven regime", "blocked", spy_trend, qqq_trend, breadth, vix_level, "severe")
         if panic:
-            return MarketRegime("panic", atr_pct, volume_state, trend_strength, False, "Panic mode: VIX/ATR shock or sharp selloff", "blocked", spy_trend, qqq_trend, breadth, vix_level)
+            return MarketRegime("panic", atr_pct, volume_state, trend_strength, False, "Panic mode: VIX/ATR shock or sharp selloff", "blocked", spy_trend, qqq_trend, breadth, vix_level, "panic")
         if vix_level is not None and vix_level >= 25:
-            return MarketRegime("high-volatility", atr_pct, volume_state, trend_strength, False, f"VIX too high: {vix_level:.1f}", "blocked", spy_trend, qqq_trend, breadth, vix_level)
+            return MarketRegime("high-volatility", atr_pct, volume_state, trend_strength, False, f"VIX too high: {vix_level:.1f}", "blocked", spy_trend, qqq_trend, breadth, vix_level, "severe")
         if is_bear or spy_trend == "bear" or qqq_trend == "bear":
-            return MarketRegime("bear", atr_pct, volume_state, trend_strength, False, "Bear-market protection active", "blocked", spy_trend, qqq_trend, breadth, vix_level)
+            severity = self._bear_severity(close, ema_50, ema_200, breadth, atr_pct, recent_return, vix_level)
+            return MarketRegime("bear", atr_pct, volume_state, trend_strength, False, f"{severity.title()} bear regime: trade entries blocked", "blocked", spy_trend, qqq_trend, breadth, vix_level, severity)
         if breadth < 45:
-            return MarketRegime("weak-breadth", atr_pct, volume_state, trend_strength, False, f"Weak market breadth: {breadth:.0f}", "blocked", spy_trend, qqq_trend, breadth, vix_level)
+            return MarketRegime("weak-breadth", atr_pct, volume_state, trend_strength, False, f"Weak market breadth: {breadth:.0f}", "blocked", spy_trend, qqq_trend, breadth, vix_level, "moderate")
         if volume_state == "low":
-            return MarketRegime("low-volume", atr_pct, volume_state, trend_strength, False, "Low relative volume", "elevated", spy_trend, qqq_trend, breadth, vix_level)
+            return MarketRegime("low-volume", atr_pct, volume_state, trend_strength, False, "Low relative volume", "elevated", spy_trend, qqq_trend, breadth, vix_level, "mild")
         if atr_pct > 5:
-            return MarketRegime("high-volatility", atr_pct, volume_state, trend_strength, False, "ATR above safe threshold", "blocked", spy_trend, qqq_trend, breadth, vix_level)
+            return MarketRegime("high-volatility", atr_pct, volume_state, trend_strength, False, "ATR above safe threshold", "blocked", spy_trend, qqq_trend, breadth, vix_level, "severe")
         if trend_strength < 0.20:
-            return MarketRegime("choppy", atr_pct, volume_state, trend_strength, False, "Weak trend strength", "elevated", spy_trend, qqq_trend, breadth, vix_level)
+            return MarketRegime("choppy", atr_pct, volume_state, trend_strength, False, "Weak trend strength", "elevated", spy_trend, qqq_trend, breadth, vix_level, "mild")
         if trend_up and breadth >= 55 and (spy_trend in {"bull", "unknown"}) and (qqq_trend in {"bull", "unknown"}):
             return MarketRegime("bull-trend", atr_pct, volume_state, trend_strength, True, "Bull trend with acceptable breadth", "normal", spy_trend, qqq_trend, breadth, vix_level)
         if trend_down:
-            return MarketRegime("bear-trend", atr_pct, volume_state, trend_strength, False, "Downtrend: EMAs bearish", "blocked", spy_trend, qqq_trend, breadth, vix_level)
+            severity = self._bear_severity(close, ema_50, ema_200, breadth, atr_pct, recent_return, vix_level)
+            return MarketRegime("bear-trend", atr_pct, volume_state, trend_strength, False, f"{severity.title()} bear trend: trade entries blocked", "blocked", spy_trend, qqq_trend, breadth, vix_level, severity)
         return MarketRegime("normal", atr_pct, volume_state, trend_strength, True, "Normal tradable regime", "normal", spy_trend, qqq_trend, breadth, vix_level)
+
+    @staticmethod
+    def _bear_severity(
+        close: float,
+        ema_50: float,
+        ema_200: float,
+        breadth: float,
+        atr_pct: float,
+        recent_return: float,
+        vix_level: Optional[float],
+    ) -> str:
+        if vix_level is not None and vix_level >= 30:
+            return "panic"
+        if atr_pct >= 5 or recent_return <= -4 or breadth < 30:
+            return "severe"
+        if close < ema_200 and ema_50 < ema_200 and breadth < 45:
+            return "severe"
+        if close < ema_200 or ema_50 < ema_200 or breadth < 50:
+            return "moderate"
+        return "mild"
 
     @staticmethod
     def _trend_state(bars: pd.DataFrame) -> str:
