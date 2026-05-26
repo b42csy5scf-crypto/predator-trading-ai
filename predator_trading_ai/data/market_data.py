@@ -56,10 +56,17 @@ class MarketDataClient:
             return self._get_polygon_bars(ticker, start, end, timeframe)
         try:
             from alpaca.data.requests import StockBarsRequest
+            from alpaca.data.enums import DataFeed
             from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 
             tf = self._alpaca_timeframe(timeframe, TimeFrame, TimeFrameUnit)
-            request = StockBarsRequest(symbol_or_symbols=ticker, start=start, end=end, timeframe=tf)
+            request = StockBarsRequest(
+                symbol_or_symbols=ticker,
+                start=start,
+                end=end,
+                timeframe=tf,
+                feed=DataFeed.IEX,
+            )
             bars = client.get_stock_bars(request).df
             normalized = self._normalize_ohlcv(bars, ticker=ticker, source="alpaca")
             if normalized.empty:
@@ -83,10 +90,11 @@ class MarketDataClient:
         if client is None:
             return self._get_yfinance_snapshot(ticker)
         try:
+            from alpaca.data.enums import DataFeed
             from alpaca.data.requests import StockLatestQuoteRequest, StockLatestTradeRequest
 
-            quote_request = StockLatestQuoteRequest(symbol_or_symbols=ticker)
-            trade_request = StockLatestTradeRequest(symbol_or_symbols=ticker)
+            quote_request = StockLatestQuoteRequest(symbol_or_symbols=ticker, feed=DataFeed.IEX)
+            trade_request = StockLatestTradeRequest(symbol_or_symbols=ticker, feed=DataFeed.IEX)
             quotes = client.get_stock_latest_quote(quote_request)
             trades = client.get_stock_latest_trade(trade_request)
             quote = quotes[ticker] if isinstance(quotes, dict) else quotes
