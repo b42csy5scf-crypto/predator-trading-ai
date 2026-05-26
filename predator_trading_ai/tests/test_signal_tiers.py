@@ -2,7 +2,7 @@ import pandas as pd
 
 from predator_trading_ai.config import Settings
 from predator_trading_ai.data.market_data import MarketDataClient
-from predator_trading_ai.engines.regime_detector import RegimeDetector
+from predator_trading_ai.engines.regime_detector import MarketRegime, RegimeDetector
 from predator_trading_ai.engines.signal_engine import SignalEngine, TradingSignal
 from predator_trading_ai.engines.strategy_engine import StrategyEngine
 
@@ -39,6 +39,44 @@ def test_watch_alert_generated_for_near_setup() -> None:
     assert watch is not None
     assert watch.signal_tier in {"B Watch Alert", "C Risky/Early Alert"}
     assert settings.min_score_c <= watch.score < settings.min_score_a
+
+
+def test_choppy_soft_regime_can_generate_c_watch_alert() -> None:
+    settings = Settings(enable_watchlist_alerts=True, enable_c_alerts=True)
+    closes = [100 + i * 0.05 for i in range(80)]
+    bars = make_bars(closes, last_volume=1800)
+    regime = MarketRegime(
+        regime="choppy",
+        volatility=1.0,
+        volume_state="normal",
+        trend_strength=0.05,
+        is_safe=False,
+        reason="Weak trend strength",
+        risk_level="elevated",
+        breadth_score=52,
+    )
+    result = StrategyEngine(settings).evaluate_watch_candidate("AAPL", bars, regime)
+    assert result.setup is not None
+    assert result.setup.signal_tier in {"B Watch Alert", "C Risky/Early Alert"}
+    assert result.rejected_by == "none"
+
+
+def test_hard_blocked_regime_prevents_watch_alert() -> None:
+    settings = Settings(enable_watchlist_alerts=True, enable_c_alerts=True)
+    bars = make_bars([100 + i * 0.1 for i in range(80)], last_volume=4000)
+    regime = MarketRegime(
+        regime="panic",
+        volatility=6.0,
+        volume_state="high",
+        trend_strength=0.2,
+        is_safe=False,
+        reason="Panic mode",
+        risk_level="blocked",
+        breadth_score=20,
+    )
+    result = StrategyEngine(settings).evaluate_watch_candidate("AAPL", bars, regime)
+    assert result.setup is None
+    assert result.rejected_by == "regime"
 
 
 def test_grade_for_score_maps_all_tiers() -> None:

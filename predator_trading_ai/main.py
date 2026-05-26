@@ -41,7 +41,7 @@ class PredatorTradingAI:
         self.unusual_whales = UnusualWhalesClient(self.settings)
         self.options_detector = OptionsFlowDetector(max_spread_pct=self.settings.max_spread_pct)
         self.regime_detector = RegimeDetector()
-        self.strategy_engine = StrategyEngine()
+        self.strategy_engine = StrategyEngine(self.settings)
         self.risk_engine = RiskEngine(self.settings)
         self.signal_engine = SignalEngine(self.db)
         self.shadow_logger = ShadowModeLogger(self.db)
@@ -181,6 +181,15 @@ class PredatorTradingAI:
         if snapshot is None:
             self.logger.warning("Skipping %s signal generation: latest quote/trade snapshot missing.", ticker)
             return
+        if self.is_extreme_illiquidity(snapshot):
+            reason = f"extreme illiquidity or invalid spread: bid={snapshot.bid} ask={snapshot.ask}"
+            self.log_rejected_or_watch(ticker, bars, regime, "liquidity", reason, allow_watch=False)
+            self.logger.info(
+                "Ticker %s score=0 grade_candidate=blocked rejected_by=liquidity reason=%s",
+                ticker,
+                reason,
+            )
+            return
 
         options_confirmation = self.get_options_confirmation(ticker)
         setup = self.strategy_engine.evaluate(
@@ -191,11 +200,12 @@ class PredatorTradingAI:
         )
         if setup is None:
             self.log_rejected_or_watch(ticker, bars, regime, "strategy", "no valid strategy setup")
-            self.logger.info("No valid strategy setup for %s.", ticker)
             return
 
         risk = self.evaluate_risk(setup, snapshot, regime, options_confirmation)
         if not risk.approved:
+            grade_candidate = setup.signal_tier
+            reason = "; ".join(risk.reasons)
             diagnostics = self.shadow_logger.diagnostics(ticker, bars, {**self.state.active_positions, **self.state.active_signals}, score=setup.score)
             self.shadow_logger.log(
                 ticker,
@@ -205,9 +215,15 @@ class PredatorTradingAI:
                 setup=setup,
                 risk=risk,
                 rejection_stage="risk",
-                rejection_reason="; ".join(risk.reasons),
+                rejection_reason=reason,
             )
-            self.logger.info("Signal vetoed for %s: %s", ticker, "; ".join(risk.reasons))
+            self.logger.info(
+                "Ticker %s score=%.0f grade_candidate=%s rejected_by=risk reason=%s",
+                ticker,
+                setup.score,
+                grade_candidate,
+                reason,
+            )
             return
 
         alert_key = self.alert_cooldown_key(ticker, setup.signal_tier)
@@ -238,14 +254,34 @@ class PredatorTradingAI:
         self.state_store.set_cooldown(self.state, alert_key)
         asyncio.run(self.telegram_bot.send_message(message))
 
-    def log_rejected_or_watch(self, ticker: str, bars, regime: MarketRegime, stage: str, reason: str) -> None:
+    def log_rejected_or_watch(
+        self,
+        ticker: str,
+        bars,
+        regime: MarketRegime,
+        stage: str,
+        reason: str,
+        allow_watch: bool = True,
+    ) -> None:
         diagnostics = self.shadow_logger.diagnostics(ticker, bars, {**self.state.active_positions, **self.state.active_signals})
-        watch = self.strategy_engine.evaluate_watch_alert(ticker, bars, regime)
+        watch_evaluation = self.strategy_engine.evaluate_watch_candidate(ticker, bars, regime) if allow_watch else None
+        if watch_evaluation is not None:
+            self.logger.info(
+                "Ticker %s score=%.0f grade_candidate=%s rejected_by=%s reason=%s",
+                ticker,
+                watch_evaluation.score,
+                watch_evaluation.grade_candidate,
+                watch_evaluation.rejected_by,
+                watch_evaluation.reason,
+            )
+        watch = watch_evaluation.setup if watch_evaluation is not None else None
         if watch is not None:
             diagnostics = self.shadow_logger.diagnostics(ticker, bars, {**self.state.active_positions, **self.state.active_signals}, score=watch.score)
             self.shadow_logger.log(ticker, "watch_alert", regime, diagnostics, setup=watch)
             self.send_watch_alert(ticker, watch, regime)
             return
+        if watch_evaluation is not None:
+            reason = f"{reason}; candidate_score={watch_evaluation.score:.0f}; grade_candidate={watch_evaluation.grade_candidate}; {watch_evaluation.reason}"
         self.shadow_logger.log(ticker, "rejected", regime, diagnostics, rejection_stage=stage, rejection_reason=reason)
 
     def send_watch_alert(self, ticker: str, setup: StrategySetup, regime: MarketRegime) -> None:
@@ -486,6 +522,11 @@ class PredatorTradingAI:
         if spread == float("inf"):
             return 0.0
         return round(clamp(100 - (spread * 25), 0, 100), 2)
+
+    def is_extreme_illiquidity(self, snapshot: MarketSnapshot) -> bool:
+        spread = spread_pct(snapshot.bid, snapshot.ask)
+        hard_spread_limit = max(self.settings.max_spread_pct * 3, 6.0)
+        return spread == float("inf") or spread > hard_spread_limit
 
     @staticmethod
     def is_market_open(now: Optional[datetime] = None) -> bool:

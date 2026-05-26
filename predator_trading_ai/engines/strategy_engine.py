@@ -31,6 +31,15 @@ class SetupQuality:
     rejections: list[str]
 
 
+@dataclass(frozen=True)
+class WatchEvaluation:
+    setup: Optional[StrategySetup]
+    score: float
+    grade_candidate: str
+    rejected_by: str
+    reason: str
+
+
 class StrategyEngine:
     def __init__(self, settings: Optional[Settings] = None) -> None:
         self.settings = settings or get_settings()
@@ -45,7 +54,7 @@ class StrategyEngine:
     ) -> Optional[StrategySetup]:
         if bars.empty or len(bars) < 50:
             return None
-        if not regime.is_safe or regime.regime in {"choppy", "bear", "bear-trend", "panic", "high-volatility", "low-volume", "weak-breadth"}:
+        if self.is_hard_blocked_regime(regime) or not regime.is_safe:
             return None
 
         latest = bars.iloc[-1]
@@ -120,8 +129,16 @@ class StrategyEngine:
         return self.settings.min_score_a_plus
 
     def evaluate_watch_alert(self, ticker: str, bars: pd.DataFrame, regime: MarketRegime) -> Optional[StrategySetup]:
-        if not self.settings.enable_watchlist_alerts or bars.empty or len(bars) < 30 or not regime.is_safe:
-            return None
+        return self.evaluate_watch_candidate(ticker, bars, regime).setup
+
+    def evaluate_watch_candidate(self, ticker: str, bars: pd.DataFrame, regime: MarketRegime) -> WatchEvaluation:
+        if not self.settings.enable_watchlist_alerts:
+            return WatchEvaluation(None, 0.0, "disabled", "config", "watchlist alerts disabled")
+        if bars.empty or len(bars) < 30:
+            return WatchEvaluation(None, 0.0, "none", "data", "insufficient bars for watch alert")
+        if self.is_hard_blocked_regime(regime):
+            return WatchEvaluation(None, 0.0, "blocked", "regime", f"hard-blocked regime: {regime.regime}")
+
         latest = bars.iloc[-1]
         close = float(latest["close"])
         atr = float(latest.get("atr_14", close * 0.02))
@@ -132,43 +149,97 @@ class StrategyEngine:
         ema_200 = float(latest.get("ema_200", close))
         volume_ratio = float(latest.get("relative_volume", 0) or 0)
         return_20 = float(latest.get("return_20", 0) or 0)
+        rsi = float(latest.get("rsi_14", 50) or 50)
         distance_to_breakout = (previous_high - close) / max(atr, close * 0.005)
+        distance_from_ema21 = abs(close - ema_21) / max(atr, close * 0.005)
 
         score = 0.0
         reasons = []
+        soft_rejections = []
+        if close > ema_50:
+            score += 10
+            reasons.append("price above EMA50")
+        else:
+            soft_rejections.append("price below EMA50")
+        if ema_50 >= ema_200:
+            score += 8
+            reasons.append("EMA50 above EMA200")
+        else:
+            soft_rejections.append("EMA50 below EMA200")
         if close > ema_50 >= ema_200:
-            score += 18
+            score += 6
             reasons.append("bull trend building")
         if ema_9 > ema_21:
-            score += 12
+            score += 10
             reasons.append("short-term momentum improving")
-        if -0.5 <= distance_to_breakout <= 1.5:
+        else:
+            soft_rejections.append("short-term momentum not confirmed")
+        if -0.75 <= distance_to_breakout <= 2.5:
             score += 14
             reasons.append(f"near 20-bar breakout {previous_high:.2f}")
+        elif distance_to_breakout < -0.75:
+            score += 6
+            reasons.append("already probing breakout area")
+        else:
+            soft_rejections.append(f"not near breakout: {distance_to_breakout:.2f} ATR away")
         if volume_ratio >= 0.8:
             score += 10
             reasons.append(f"volume rising {volume_ratio:.2f}x")
+        elif volume_ratio >= 0.55:
+            score += 5
+            reasons.append(f"low but usable volume {volume_ratio:.2f}x")
+            soft_rejections.append(f"volume not confirmed: {volume_ratio:.2f}x")
+        else:
+            soft_rejections.append(f"volume too quiet: {volume_ratio:.2f}x")
+        if 42 <= rsi <= 72:
+            score += 6
+            reasons.append(f"RSI in tradable zone {rsi:.1f}")
+        else:
+            soft_rejections.append(f"RSI outside preferred zone: {rsi:.1f}")
+        if distance_from_ema21 <= 2.75:
+            score += 6
+            reasons.append("not too extended from EMA21")
+        else:
+            soft_rejections.append(f"extended from EMA21: {distance_from_ema21:.2f} ATR")
         if return_20 > 0:
             score += min(return_20, 12) * 0.5
             reasons.append(f"positive 20-bar strength {return_20:.1f}%")
+        else:
+            soft_rejections.append(f"negative 20-bar strength {return_20:.1f}%")
+
+        if regime.regime == "bull-trend":
+            score += 5
+            reasons.append("bull regime support")
+        elif regime.regime in {"choppy", "low-volume", "weak-breadth"}:
+            score -= 6
+            soft_rejections.append(f"soft regime warning: {regime.regime}")
 
         score = round(clamp(score, 0, self.settings.min_score_a - 0.01), 2)
-        if score < self.settings.min_score_c or score >= self.settings.min_score_a:
-            return None
         tier = self.grade_for_score(score)
+        if score < self.settings.min_score_c or score >= self.settings.min_score_a:
+            reason = "; ".join(soft_rejections or reasons or ["score below watch threshold"])
+            return WatchEvaluation(None, score, tier, "score", reason)
         if tier == "B Watch Alert" and not self.settings.enable_b_alerts:
-            return None
+            return WatchEvaluation(None, score, tier, "config", "B alerts disabled")
         if tier == "C Risky/Early Alert" and not self.settings.enable_c_alerts:
-            return None
-        return self._long_setup(
+            return WatchEvaluation(None, score, tier, "config", "C alerts disabled")
+        reason = "; ".join(reasons) if reasons else "early setup forming"
+        if soft_rejections:
+            reason = f"{reason}; watch risks: {'; '.join(soft_rejections[:3])}"
+        setup = self._long_setup(
             ticker,
             "graded watch setup",
             close,
             atr,
             score,
-            "; ".join(reasons) if reasons else "setup building",
+            reason,
             signal_tier=tier,
         )
+        return WatchEvaluation(setup, score, tier, "none", reason)
+
+    @staticmethod
+    def is_hard_blocked_regime(regime: MarketRegime) -> bool:
+        return regime.regime in {"no-trade", "bear", "bear-trend", "panic", "high-volatility", "news-driven"}
 
     def grade_for_score(self, score: float) -> str:
         if score >= self.settings.min_score_a_plus_plus:
