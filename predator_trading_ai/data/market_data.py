@@ -61,11 +61,11 @@ class MarketDataClient:
             tf = self._alpaca_timeframe(timeframe, TimeFrame, TimeFrameUnit)
             request = StockBarsRequest(symbol_or_symbols=ticker, start=start, end=end, timeframe=tf)
             bars = client.get_stock_bars(request).df
-            if bars.empty:
-                return pd.DataFrame()
-            if isinstance(bars.index, pd.MultiIndex):
-                bars = bars.xs(ticker, level=0)
-            return bars.reset_index()
+            normalized = self._normalize_ohlcv(bars, ticker=ticker, source="alpaca")
+            if normalized.empty:
+                self.logger.warning("Alpaca returned malformed/empty bars for %s; using fallback.", ticker)
+                return self._get_polygon_bars(ticker, start, end, timeframe)
+            return normalized
         except Exception as exc:
             self.logger.exception("Failed to fetch bars for %s: %s", ticker, exc)
             return self._get_polygon_bars(ticker, start, end, timeframe)
@@ -107,9 +107,9 @@ class MarketDataClient:
         if bars.empty:
             return bars
         df = bars.copy()
-        for column in ["open", "high", "low", "close", "volume"]:
-            if column not in df:
-                raise ValueError(f"Missing required OHLCV column: {column}")
+        df = self._normalize_ohlcv(df, source="indicators")
+        if df.empty:
+            return df
 
         typical = (df["high"] + df["low"] + df["close"]) / 3
         df["vwap"] = (typical * df["volume"]).cumsum() / df["volume"].replace(0, np.nan).cumsum()
@@ -167,7 +167,7 @@ class MarketDataClient:
                         "volume": int(getattr(agg, "volume", 0)),
                     }
                 )
-            return pd.DataFrame(rows)
+            return self._normalize_ohlcv(pd.DataFrame(rows), ticker=ticker, source="polygon")
         except Exception as exc:
             self.logger.exception("Failed to fetch Polygon fallback bars for %s: %s", ticker, exc)
             return self._get_yfinance_bars(ticker, start, end, timeframe)
@@ -208,7 +208,7 @@ class MarketDataClient:
                 }
             )
             frame = frame.reset_index().rename(columns={"Datetime": "timestamp", "Date": "timestamp"})
-            return frame[["timestamp", "open", "high", "low", "close", "volume"]].dropna()
+            return self._normalize_ohlcv(frame, ticker=ticker, source="yfinance")
         except Exception as exc:
             self.logger.exception("Failed to fetch yfinance fallback bars for %s: %s", ticker, exc)
             return pd.DataFrame()
@@ -234,6 +234,73 @@ class MarketDataClient:
             vwap=None,
             timestamp=timestamp,
         )
+
+    def _normalize_ohlcv(
+        self,
+        frame: pd.DataFrame,
+        ticker: Optional[str] = None,
+        source: str = "unknown",
+    ) -> pd.DataFrame:
+        if frame is None or frame.empty:
+            return pd.DataFrame()
+
+        df = frame.copy()
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = [str(column[-1] or column[0]).lower() for column in df.columns]
+        else:
+            df.columns = [str(column).strip().lower() for column in df.columns]
+
+        if isinstance(df.index, pd.MultiIndex):
+            index_names = [str(name).lower() if name is not None else "" for name in df.index.names]
+            try:
+                if ticker and "symbol" in index_names:
+                    df = df.xs(ticker, level=index_names.index("symbol"))
+                elif ticker:
+                    df = df.xs(ticker, level=0)
+            except (KeyError, IndexError, ValueError) as exc:
+                self.logger.warning("%s bars for %s missing expected symbol level: %s", source, ticker, exc)
+                return pd.DataFrame()
+            df = df.reset_index()
+        else:
+            df = df.reset_index() if df.index.name is not None or "timestamp" not in df.columns else df
+
+        rename_map = {
+            "date": "timestamp",
+            "datetime": "timestamp",
+            "time": "timestamp",
+            "t": "timestamp",
+            "o": "open",
+            "h": "high",
+            "l": "low",
+            "c": "close",
+            "v": "volume",
+        }
+        df = df.rename(columns={column: rename_map.get(column, column) for column in df.columns})
+
+        required = ["open", "high", "low", "close", "volume"]
+        missing = [column for column in required if column not in df.columns]
+        if missing:
+            self.logger.warning(
+                "%s bars for %s missing required columns %s. Available columns: %s",
+                source,
+                ticker or "unknown",
+                missing,
+                list(df.columns),
+            )
+            return pd.DataFrame()
+
+        if "timestamp" not in df.columns:
+            df["timestamp"] = pd.NaT
+
+        columns = ["timestamp", "open", "high", "low", "close", "volume"]
+        cleaned = df.loc[:, columns].copy()
+        for column in ["open", "high", "low", "close", "volume"]:
+            cleaned[column] = pd.to_numeric(cleaned[column], errors="coerce")
+        cleaned = cleaned.dropna(subset=["open", "high", "low", "close", "volume"])
+        if cleaned.empty:
+            self.logger.warning("%s bars for %s had no valid numeric OHLCV rows.", source, ticker or "unknown")
+            return pd.DataFrame()
+        return cleaned.reset_index(drop=True)
 
     @staticmethod
     def _alpaca_timeframe(timeframe: str, timeframe_cls, timeframe_unit_cls):
