@@ -90,7 +90,7 @@ class StrategyEngine:
         final_score = clamp(best.score + bonus, 0, 100)
         if final_score < self._score_threshold(regime):
             return None
-        tier = "A+ Signal" if final_score >= self.settings.min_score_a_plus else "A Signal"
+        tier = self.grade_for_score(final_score)
 
         return StrategySetup(
             ticker=best.ticker,
@@ -142,28 +142,44 @@ class StrategyEngine:
         if ema_9 > ema_21:
             score += 12
             reasons.append("short-term momentum improving")
-        if 0 <= distance_to_breakout <= 1.0:
+        if -0.5 <= distance_to_breakout <= 1.5:
             score += 14
             reasons.append(f"near 20-bar breakout {previous_high:.2f}")
-        if volume_ratio >= 1.0:
+        if volume_ratio >= 0.8:
             score += 10
             reasons.append(f"volume rising {volume_ratio:.2f}x")
         if return_20 > 0:
             score += min(return_20, 12) * 0.5
             reasons.append(f"positive 20-bar strength {return_20:.1f}%")
 
-        score = round(clamp(score, 0, 59), 2)
-        if score < self.settings.min_score_watch or score >= self.settings.min_score_a:
+        score = round(clamp(score, 0, self.settings.min_score_a - 0.01), 2)
+        if score < self.settings.min_score_c or score >= self.settings.min_score_a:
+            return None
+        tier = self.grade_for_score(score)
+        if tier == "B Watch Alert" and not self.settings.enable_b_alerts:
+            return None
+        if tier == "C Risky/Early Alert" and not self.settings.enable_c_alerts:
             return None
         return self._long_setup(
             ticker,
-            "watch alert: setup building",
+            "graded watch setup",
             close,
             atr,
             score,
             "; ".join(reasons) if reasons else "setup building",
-            signal_tier="Watch Alert",
+            signal_tier=tier,
         )
+
+    def grade_for_score(self, score: float) -> str:
+        if score >= self.settings.min_score_a_plus_plus:
+            return "A++ Signal"
+        if score >= self.settings.min_score_a_plus:
+            return "A+ Signal"
+        if score >= self.settings.min_score_a:
+            return "A Signal"
+        if score >= self.settings.min_score_b:
+            return "B Watch Alert"
+        return "C Risky/Early Alert"
 
     @staticmethod
     def _quality_gate(

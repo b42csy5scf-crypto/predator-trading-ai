@@ -20,25 +20,41 @@ def make_bars(closes: list[float], last_volume: int = 5000) -> pd.DataFrame:
     return MarketDataClient(Settings()).add_indicators(bars)
 
 
-def test_strategy_labels_a_plus_signal() -> None:
-    settings = Settings(min_score_a_plus=65, min_score_a=58)
+def test_strategy_labels_a_plus_plus_signal() -> None:
+    settings = Settings(min_score_a_plus_plus=75, min_score_a_plus=65, min_score_a=58)
     closes = [100 + i * 0.2 for i in range(79)] + [116.2]
     bars = make_bars(closes, last_volume=5000)
     regime = RegimeDetector().detect(bars, breadth_score=80)
     setup = StrategyEngine(settings).evaluate("AAPL", bars, regime)
     assert setup is not None
-    assert setup.signal_tier == "A+ Signal"
+    assert setup.signal_tier == "A++ Signal"
 
 
 def test_watch_alert_generated_for_near_setup() -> None:
-    settings = Settings(enable_watchlist_alerts=True, min_score_watch=50)
+    settings = Settings(enable_watchlist_alerts=True, enable_b_alerts=True, enable_c_alerts=True)
     closes = [100 + i * 0.15 for i in range(79)] + [111.7]
     bars = make_bars(closes, last_volume=2600)
     regime = RegimeDetector().detect(bars, breadth_score=70)
     watch = StrategyEngine(settings).evaluate_watch_alert("AAPL", bars, regime)
     assert watch is not None
-    assert watch.signal_tier == "Watch Alert"
-    assert 50 <= watch.score < settings.min_score_a
+    assert watch.signal_tier in {"B Watch Alert", "C Risky/Early Alert"}
+    assert settings.min_score_c <= watch.score < settings.min_score_a
+
+
+def test_grade_for_score_maps_all_tiers() -> None:
+    settings = Settings(
+        min_score_a_plus_plus=75,
+        min_score_a_plus=65,
+        min_score_a=58,
+        min_score_b=50,
+        min_score_c=40,
+    )
+    engine = StrategyEngine(settings)
+    assert engine.grade_for_score(80) == "A++ Signal"
+    assert engine.grade_for_score(70) == "A+ Signal"
+    assert engine.grade_for_score(60) == "A Signal"
+    assert engine.grade_for_score(52) == "B Watch Alert"
+    assert engine.grade_for_score(42) == "C Risky/Early Alert"
 
 
 def test_signal_format_includes_tier_label() -> None:
@@ -61,4 +77,6 @@ def test_signal_format_includes_tier_label() -> None:
         reason="test",
         do_not_enter_conditions=[],
     )
-    assert "A+ Signal" in SignalEngine.format_alert(signal, label="A+ Signal").splitlines()[0]
+    formatted = SignalEngine.format_alert(signal, label="A+ Signal")
+    assert "A+ Signal" in formatted.splitlines()[0]
+    assert "Grade: A+ Signal" in formatted

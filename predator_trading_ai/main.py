@@ -210,9 +210,9 @@ class PredatorTradingAI:
             self.logger.info("Signal vetoed for %s: %s", ticker, "; ".join(risk.reasons))
             return
 
-        signal_key = self.state_store.signal_key(ticker, setup.setup_type, setup.direction)
-        if self.state_store.is_on_cooldown(self.state, signal_key, self.settings.signal_cooldown_seconds):
-            self.logger.info("Skipping duplicate alert for %s due to cooldown.", signal_key)
+        alert_key = self.alert_cooldown_key(ticker, setup.signal_tier)
+        if self.state_store.is_on_cooldown(self.state, alert_key, self.alert_cooldown_seconds):
+            self.logger.info("Skipping duplicate %s alert for %s due to cooldown.", setup.signal_tier, ticker)
             return
 
         expected_win_rate = self.expected_win_rate(ticker, setup.setup_type)
@@ -222,18 +222,21 @@ class PredatorTradingAI:
             return
 
         self.logger.info("%s generated for %s: %s %.0f%%", setup.signal_tier, ticker, signal.setup_type, signal.confidence)
-        self.state.active_signals[signal_key] = {
+        self.state.active_signals[alert_key] = {
             "ticker": ticker,
             "setup_type": setup.setup_type,
             "direction": setup.direction,
+            "grade": setup.signal_tier,
             "confidence": signal.confidence,
             "sector": SECTOR_BY_TICKER.get(ticker),
             "correlation_group": CORRELATION_GROUP_BY_TICKER.get(ticker),
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
-        self.state.last_telegram_alert = signal_key
-        self.state_store.set_cooldown(self.state, signal_key)
-        asyncio.run(self.telegram_bot.send_signal(signal, label=setup.signal_tier))
+        message = SignalEngine.format_alert(signal, label=setup.signal_tier)
+        self.log_sent_alert(ticker, setup.signal_tier, "trade_candidate", setup.score, setup.setup_type, regime.regime, message)
+        self.state.last_telegram_alert = alert_key
+        self.state_store.set_cooldown(self.state, alert_key)
+        asyncio.run(self.telegram_bot.send_message(message))
 
     def log_rejected_or_watch(self, ticker: str, bars, regime: MarketRegime, stage: str, reason: str) -> None:
         diagnostics = self.shadow_logger.diagnostics(ticker, bars, {**self.state.active_positions, **self.state.active_signals})
@@ -248,21 +251,66 @@ class PredatorTradingAI:
     def send_watch_alert(self, ticker: str, setup: StrategySetup, regime: MarketRegime) -> None:
         if not self.settings.enable_watchlist_alerts:
             return
-        signal_key = self.state_store.signal_key(ticker, setup.setup_type, setup.signal_tier)
-        if self.state_store.is_on_cooldown(self.state, signal_key, self.settings.signal_cooldown_seconds):
+        if setup.signal_tier == "B Watch Alert" and not self.settings.enable_b_alerts:
+            return
+        if setup.signal_tier == "C Risky/Early Alert" and not self.settings.enable_c_alerts:
+            return
+        alert_key = self.alert_cooldown_key(ticker, setup.signal_tier)
+        if self.state_store.is_on_cooldown(self.state, alert_key, self.alert_cooldown_seconds):
             return
         message = (
-            "Predator Trading AI Watch Alert\n"
-            "Observe only - not a trade entry\n"
+            f"Predator Trading AI {setup.signal_tier}\n"
+            "Observe only — not a trade entry.\n"
             f"Ticker: {ticker}\n"
+            f"Grade: {setup.signal_tier}\n"
             f"Setup: {setup.setup_type}\n"
             f"Score: {setup.score:.0f}%\n"
-            f"Price Zone: {setup.entry_zone_low:.2f} - {setup.entry_zone_high:.2f}\n"
+            f"Entry Zone: {setup.entry_zone_low:.2f} - {setup.entry_zone_high:.2f}\n"
+            f"Stop / Invalidation: {setup.stop_loss:.2f}\n"
+            f"Targets: {setup.targets[0]:.2f}, {setup.targets[1]:.2f}, {setup.targets[2]:.2f}\n"
+            f"Confidence: {setup.score:.0f}%\n"
             f"Regime: {regime.regime}\n"
-            f"Reason: {setup.reason}"
+            f"Reason: {setup.reason}\n"
+            "Risk Warning: early or lower-quality setup; wait for confirmation before considering action."
         )
-        self.state_store.set_cooldown(self.state, signal_key)
+        self.log_sent_alert(ticker, setup.signal_tier, "observe_only", setup.score, setup.setup_type, regime.regime, message)
+        self.state.last_telegram_alert = alert_key
+        self.state_store.set_cooldown(self.state, alert_key)
         asyncio.run(self.telegram_bot.send_message(message))
+
+    @property
+    def alert_cooldown_seconds(self) -> int:
+        return int(self.settings.alert_cooldown_minutes * 60)
+
+    @staticmethod
+    def alert_cooldown_key(ticker: str, grade: str) -> str:
+        return f"{ticker}:grade:{grade}"
+
+    def log_sent_alert(
+        self,
+        ticker: str,
+        grade: str,
+        alert_type: str,
+        score: float,
+        setup_type: str,
+        regime: str,
+        message: str,
+    ) -> None:
+        payload = {
+            "ticker": ticker,
+            "grade": grade,
+            "alert_type": alert_type,
+            "score": score,
+            "setup_type": setup_type,
+            "regime": regime,
+            "message": message,
+        }
+        try:
+            self.db.insert_dict("sent_alerts", payload)
+        except Exception as exc:
+            self.logger.warning("sent_alerts insert failed; applying schema and retrying: %s", exc)
+            self.db.initialize()
+            self.db.insert_dict("sent_alerts", payload)
 
     def load_market_context(self) -> dict:
         context: dict = {}

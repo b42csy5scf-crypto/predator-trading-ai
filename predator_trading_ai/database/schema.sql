@@ -199,3 +199,15 @@ CREATE TABLE IF NOT EXISTS forward_test_results (
     top_rejection_reasons TEXT NOT NULL,
     notes TEXT
 );
+
+CREATE TABLE IF NOT EXISTS sent_alerts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    ticker TEXT NOT NULL,
+    grade TEXT NOT NULL,
+    alert_type TEXT NOT NULL,
+    score REAL,
+    setup_type TEXT,
+    regime TEXT,
+    message TEXT NOT NULL
+);

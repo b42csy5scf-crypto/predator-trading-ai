@@ -23,14 +23,17 @@ class TelegramAlertBot:
             from telegram import Bot
         
             bot = Bot(self.settings.telegram_bot_token)
-        
-            # Send to Chat ID 1
-            if hasattr(self.settings, 'telegram_chat_id_1') and self.settings.telegram_chat_id_1:
-                await bot.send_message(chat_id=self.settings.telegram_chat_id_1, text=text)
-        
-            # Send to Chat ID 2
-            if hasattr(self.settings, 'telegram_chat_id_2') and self.settings.telegram_chat_id_2:
-                await bot.send_message(chat_id=self.settings.telegram_chat_id_2, text=text)
+            chat_ids = [
+                getattr(self.settings, "telegram_chat_id", None),
+                getattr(self.settings, "telegram_chat_id_1", None),
+                getattr(self.settings, "telegram_chat_id_2", None),
+            ]
+            sent = False
+            for chat_id in [chat_id for chat_id in chat_ids if chat_id]:
+                await bot.send_message(chat_id=chat_id, text=text)
+                sent = True
+            if not sent:
+                self.logger.info("Telegram chat id missing; alert not sent: %s", text[:120])
             
         except Exception as exc:
             self.logger.exception("Telegram send failed: %s", exc)

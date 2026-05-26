@@ -75,6 +75,7 @@ class SignalEngine:
         return (
             f"Predator Trading AI {label}\n"
             f"Ticker: {signal.ticker}\n"
+            f"Grade: {label}\n"
             f"Direction: {signal.direction}\n"
             f"Setup: {signal.setup_type}\n"
             f"Entry Zone: {signal.entry_zone_low:.2f} - {signal.entry_zone_high:.2f}\n"

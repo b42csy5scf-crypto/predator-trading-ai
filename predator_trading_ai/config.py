@@ -95,10 +95,17 @@ try:
         neutral_regime_min_score: float = Field(default=78.0, ge=0, le=100)
         max_sector_positions: int = Field(default=3, ge=1)
         max_correlation_group_positions: int = Field(default=2, ge=1)
+        min_score_a_plus_plus: float = Field(default=75.0, ge=0, le=100)
         min_score_a_plus: float = Field(default=65.0, ge=0, le=100)
         min_score_a: float = Field(default=58.0, ge=0, le=100)
+        min_score_b: float = Field(default=50.0, ge=0, le=100)
+        min_score_c: float = Field(default=40.0, ge=0, le=100)
         min_score_watch: float = Field(default=50.0, ge=0, le=100)
+        enable_b_alerts: bool = True
+        enable_c_alerts: bool = True
         enable_watchlist_alerts: bool = True
+        alert_cooldown_minutes: int = Field(default=60, ge=0)
+        graded_alert_cooldown_seconds: int = Field(default=3600, ge=0)
 
         @field_validator("live_trading")
         @classmethod
@@ -166,10 +173,17 @@ except ModuleNotFoundError:
         neutral_regime_min_score: float = 78.0
         max_sector_positions: int = 3
         max_correlation_group_positions: int = 2
+        min_score_a_plus_plus: float = 75.0
         min_score_a_plus: float = 65.0
         min_score_a: float = 58.0
+        min_score_b: float = 50.0
+        min_score_c: float = 40.0
         min_score_watch: float = 50.0
+        enable_b_alerts: bool = True
+        enable_c_alerts: bool = True
         enable_watchlist_alerts: bool = True
+        alert_cooldown_minutes: int = 60
+        graded_alert_cooldown_seconds: int = 3600
 
         def __post_init__(self) -> None:
             _load_dotenv()
