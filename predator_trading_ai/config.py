@@ -69,6 +69,8 @@ try:
 
         telegram_bot_token: Optional[str] = None
         telegram_chat_id: Optional[str] = None
+        telegram_chat_id_1: Optional[str] = None
+        telegram_chat_id_2: Optional[str] = None
 
         max_risk_per_trade_pct: float = Field(default=1.0, gt=0, le=10)
         max_daily_loss_pct: float = Field(default=3.0, gt=0, le=20)
@@ -147,6 +149,8 @@ except ModuleNotFoundError:
 
         telegram_bot_token: Optional[str] = None
         telegram_chat_id: Optional[str] = None
+        telegram_chat_id_1: Optional[str] = None
+        telegram_chat_id_2: Optional[str] = None
 
         max_risk_per_trade_pct: float = 1.0
         max_daily_loss_pct: float = 3.0

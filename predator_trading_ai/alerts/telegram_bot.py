@@ -23,13 +23,9 @@ class TelegramAlertBot:
             from telegram import Bot
         
             bot = Bot(self.settings.telegram_bot_token)
-            chat_ids = [
-                getattr(self.settings, "telegram_chat_id", None),
-                getattr(self.settings, "telegram_chat_id_1", None),
-                getattr(self.settings, "telegram_chat_id_2", None),
-            ]
+            chat_ids = self.configured_chat_ids()
             sent = False
-            for chat_id in [chat_id for chat_id in chat_ids if chat_id]:
+            for chat_id in chat_ids:
                 await bot.send_message(chat_id=chat_id, text=text)
                 sent = True
             if not sent:
@@ -37,6 +33,22 @@ class TelegramAlertBot:
             
         except Exception as exc:
             self.logger.exception("Telegram send failed: %s", exc)
+
+    def configured_chat_ids(self) -> list[str]:
+        primary = self._split_chat_ids(getattr(self.settings, "telegram_chat_id", None))
+        if primary:
+            return primary
+        fallback = [
+            *self._split_chat_ids(getattr(self.settings, "telegram_chat_id_1", None)),
+            *self._split_chat_ids(getattr(self.settings, "telegram_chat_id_2", None)),
+        ]
+        return list(dict.fromkeys(fallback))
+
+    @staticmethod
+    def _split_chat_ids(value: Optional[str]) -> list[str]:
+        if not value:
+            return []
+        return [part.strip() for part in str(value).split(",") if part.strip()]
 
     def command_status(self) -> str:
         live = "ON" if self.settings.live_trading else "OFF"
