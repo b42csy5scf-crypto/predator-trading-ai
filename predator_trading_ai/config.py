@@ -104,7 +104,7 @@ try:
         min_score_c: float = Field(default=40.0, ge=0, le=100)
         min_score_watch: float = Field(default=50.0, ge=0, le=100)
         enable_b_alerts: bool = True
-        enable_c_alerts: bool = True
+        enable_c_alerts: bool = False
         enable_watchlist_alerts: bool = True
         alert_cooldown_minutes: int = Field(default=60, ge=0)
         graded_alert_cooldown_seconds: int = Field(default=3600, ge=0)
@@ -184,7 +184,7 @@ except ModuleNotFoundError:
         min_score_c: float = 40.0
         min_score_watch: float = 50.0
         enable_b_alerts: bool = True
-        enable_c_alerts: bool = True
+        enable_c_alerts: bool = False
         enable_watchlist_alerts: bool = True
         alert_cooldown_minutes: int = 60
         graded_alert_cooldown_seconds: int = 3600

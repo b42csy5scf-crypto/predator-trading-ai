@@ -1,5 +1,6 @@
 from predator_trading_ai.config import Settings
 from predator_trading_ai.engines.regime_detector import MarketRegime
+from predator_trading_ai.engines.strategy_engine import StrategySetup
 from predator_trading_ai.main import PredatorTradingAI
 
 
@@ -53,3 +54,32 @@ def test_bear_watch_regime_detection() -> None:
     )
     assert PredatorTradingAI.is_bear_watch_regime(mild_bear)
     assert not PredatorTradingAI.is_bear_watch_regime(severe_bear)
+
+
+def test_c_grade_watch_alert_is_not_sent_or_logged(tmp_path) -> None:
+    settings = Settings(
+        database_url=f"sqlite:///{tmp_path / 'predator_test.db'}",
+        telegram_bot_token="dummy-token",
+        telegram_chat_id="123",
+    )
+    app = PredatorTradingAI(settings)
+    app.db.initialize()
+    setup = StrategySetup(
+        ticker="AAPL",
+        direction="long",
+        setup_type="graded watch setup",
+        score=44,
+        entry_zone_low=100,
+        entry_zone_high=101,
+        stop_loss=98,
+        targets=(103, 105, 108),
+        reason="early setup forming",
+        do_not_enter_conditions=[],
+        signal_tier="C Risky/Early Alert",
+    )
+    regime = MarketRegime("normal", 1.0, "normal", 0.3, True, "Normal tradable regime")
+
+    app.send_watch_alert("AAPL", setup, regime)
+
+    rows = app.db.fetch_all("SELECT * FROM sent_alerts")
+    assert rows == []

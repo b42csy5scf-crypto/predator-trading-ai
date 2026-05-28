@@ -136,6 +136,25 @@ def test_grade_for_score_maps_all_tiers() -> None:
     assert engine.grade_for_score(42) == "C Risky/Early Alert"
 
 
+def test_c_grade_can_still_be_generated_for_internal_analytics_when_disabled() -> None:
+    settings = Settings(enable_watchlist_alerts=True, enable_c_alerts=False, min_score_b=58)
+    closes = [100 + i * 0.04 for i in range(80)]
+    bars = make_bars(closes, last_volume=1200)
+    regime = MarketRegime(
+        regime="choppy",
+        volatility=1.0,
+        volume_state="normal",
+        trend_strength=0.05,
+        is_safe=False,
+        reason="Weak trend strength",
+        risk_level="elevated",
+        breadth_score=52,
+    )
+    result = StrategyEngine(settings).evaluate_watch_candidate("AAPL", bars, regime)
+    assert result.setup is not None
+    assert result.setup.signal_tier == "C Risky/Early Alert"
+
+
 def test_signal_format_includes_tier_label() -> None:
     signal = TradingSignal(
         ticker="AAPL",

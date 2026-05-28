@@ -289,7 +289,8 @@ class PredatorTradingAI:
             return
         if setup.signal_tier == "B Watch Alert" and not self.settings.enable_b_alerts:
             return
-        if setup.signal_tier == "C Risky/Early Alert" and not self.settings.enable_c_alerts:
+        if setup.signal_tier == "C Risky/Early Alert":
+            self.logger.info("Skipping Telegram alert for %s: C-grade alerts are disabled.", ticker)
             return
         alert_key = self.alert_cooldown_key(ticker, setup.signal_tier)
         if self.state_store.is_on_cooldown(self.state, alert_key, self.alert_cooldown_seconds):

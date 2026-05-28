@@ -224,8 +224,6 @@ class StrategyEngine:
             return WatchEvaluation(None, score, tier, "score", reason)
         if tier == "B Watch Alert" and not self.settings.enable_b_alerts:
             return WatchEvaluation(None, score, tier, "config", "B alerts disabled")
-        if tier == "C Risky/Early Alert" and not self.settings.enable_c_alerts:
-            return WatchEvaluation(None, score, tier, "config", "C alerts disabled")
         reason = "; ".join(reasons) if reasons else "early setup forming"
         if soft_rejections:
             reason = f"{reason}; watch risks: {'; '.join(soft_rejections[:3])}"
