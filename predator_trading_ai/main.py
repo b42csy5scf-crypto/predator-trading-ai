@@ -10,6 +10,8 @@ from predator_trading_ai.config import Settings, get_settings
 from predator_trading_ai.data.market_data import MarketDataClient, MarketSnapshot
 from predator_trading_ai.data.options_data import OptionsFlowDetector, UnusualWhalesClient
 from predator_trading_ai.database.db import Database
+from predator_trading_ai.engines.active_signal_tracker import ActiveSignalTracker
+from predator_trading_ai.engines.alert_policy import AlertPolicy
 from predator_trading_ai.engines.regime_detector import MarketRegime, RegimeDetector
 from predator_trading_ai.engines.risk_engine import RiskEngine
 from predator_trading_ai.engines.shadow_mode import ShadowModeLogger
@@ -44,6 +46,8 @@ class PredatorTradingAI:
         self.strategy_engine = StrategyEngine(self.settings)
         self.risk_engine = RiskEngine(self.settings)
         self.signal_engine = SignalEngine(self.db)
+        self.alert_policy = AlertPolicy(self.settings, self.db)
+        self.active_signal_tracker = ActiveSignalTracker(self.db)
         self.shadow_logger = ShadowModeLogger(self.db)
         self.telegram_bot = TelegramAlertBot(self.settings, self.db)
         self.retry = RetryPolicy(
@@ -181,6 +185,7 @@ class PredatorTradingAI:
         if snapshot is None:
             self.logger.warning("Skipping %s signal generation: latest quote/trade snapshot missing.", ticker)
             return
+        self.process_active_signal_updates(ticker, snapshot.price)
         if self.is_extreme_illiquidity(snapshot):
             reason = f"extreme illiquidity or invalid spread: bid={snapshot.bid} ask={snapshot.ask}"
             self.log_rejected_or_watch(ticker, bars, regime, "liquidity", reason, allow_watch=False)
@@ -226,6 +231,16 @@ class PredatorTradingAI:
             )
             return
 
+        alert_decision = self.alert_policy.evaluate(ticker, setup.signal_tier, setup.score, regime)
+        if not alert_decision.allowed:
+            self.logger.info(
+                "Telegram alert suppressed for %s grade=%s score=%.0f: %s",
+                ticker,
+                setup.signal_tier,
+                setup.score,
+                alert_decision.reason,
+            )
+            return
         alert_key = self.alert_cooldown_key(ticker, setup.signal_tier)
         if self.state_store.is_on_cooldown(self.state, alert_key, self.alert_cooldown_seconds):
             self.logger.info("Skipping duplicate %s alert for %s due to cooldown.", setup.signal_tier, ticker)
@@ -250,6 +265,8 @@ class PredatorTradingAI:
         }
         message = SignalEngine.format_alert(signal, label=setup.signal_tier)
         self.log_sent_alert(ticker, setup.signal_tier, "trade_candidate", setup.score, setup.setup_type, regime.regime, message)
+        self.alert_policy.record(ticker, setup.signal_tier)
+        self.active_signal_tracker.register_trading_signal(signal, setup.signal_tier)
         self.state.last_telegram_alert = alert_key
         self.state_store.set_cooldown(self.state, alert_key)
         asyncio.run(self.telegram_bot.send_message(message))
@@ -292,14 +309,37 @@ class PredatorTradingAI:
         if setup.signal_tier == "C Risky/Early Alert":
             self.logger.info("Skipping Telegram alert for %s: C-grade alerts are disabled.", ticker)
             return
+        alert_decision = self.alert_policy.evaluate(ticker, setup.signal_tier, setup.score, regime)
+        if not alert_decision.allowed:
+            self.logger.info(
+                "Telegram watch alert suppressed for %s grade=%s score=%.0f: %s",
+                ticker,
+                setup.signal_tier,
+                setup.score,
+                alert_decision.reason,
+            )
+            return
         alert_key = self.alert_cooldown_key(ticker, setup.signal_tier)
         if self.state_store.is_on_cooldown(self.state, alert_key, self.alert_cooldown_seconds):
             return
         message = SignalEngine.format_watch_alert(setup, bear_regime=self.is_bear_watch_regime(regime))
         self.log_sent_alert(ticker, setup.signal_tier, "observe_only", setup.score, setup.setup_type, regime.regime, message)
+        self.alert_policy.record(ticker, setup.signal_tier)
+        self.active_signal_tracker.register_watch_signal(setup)
         self.state.last_telegram_alert = alert_key
         self.state_store.set_cooldown(self.state, alert_key)
         asyncio.run(self.telegram_bot.send_message(message))
+
+    def process_active_signal_updates(self, ticker: str, current_price: float) -> None:
+        updates = self.active_signal_tracker.check_ticker(ticker, current_price)
+        for update in updates:
+            self.logger.info(
+                "Active signal update for %s: %s at %.2f",
+                ticker,
+                update.update_type,
+                current_price,
+            )
+            asyncio.run(self.telegram_bot.send_message(update.message))
 
     @staticmethod
     def is_bear_watch_regime(regime: MarketRegime) -> bool:

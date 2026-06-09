@@ -211,3 +211,52 @@ CREATE TABLE IF NOT EXISTS sent_alerts (
     regime TEXT,
     message TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS active_signals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    closed_at TEXT,
+    ticker TEXT NOT NULL,
+    grade TEXT NOT NULL,
+    direction TEXT NOT NULL DEFAULT 'long',
+    entry_zone_low REAL NOT NULL,
+    entry_zone_high REAL NOT NULL,
+    stop_loss REAL NOT NULL,
+    tp1 REAL NOT NULL,
+    tp2 REAL NOT NULL,
+    tp3 REAL NOT NULL,
+    sent_at TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active',
+    tp1_hit INTEGER NOT NULL DEFAULT 0,
+    tp2_hit INTEGER NOT NULL DEFAULT 0,
+    tp3_hit INTEGER NOT NULL DEFAULT 0,
+    last_price REAL,
+    close_reason TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_active_signals_ticker_status
+ON active_signals(ticker, status);
+
+CREATE TABLE IF NOT EXISTS signal_updates (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    active_signal_id INTEGER NOT NULL,
+    ticker TEXT NOT NULL,
+    update_type TEXT NOT NULL,
+    price REAL NOT NULL,
+    status TEXT NOT NULL,
+    message TEXT NOT NULL,
+    UNIQUE(active_signal_id, update_type),
+    FOREIGN KEY(active_signal_id) REFERENCES active_signals(id)
+);
+
+CREATE TABLE IF NOT EXISTS alert_daily_limits (
+    alert_date TEXT NOT NULL,
+    ticker TEXT NOT NULL,
+    alert_count INTEGER NOT NULL DEFAULT 0,
+    highest_grade TEXT,
+    highest_grade_rank INTEGER NOT NULL DEFAULT 0,
+    last_alert_at TEXT,
+    PRIMARY KEY(alert_date, ticker)
+);
