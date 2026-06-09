@@ -50,18 +50,56 @@ def test_duplicate_ticker_requires_grade_improvement(tmp_path) -> None:
     assert upgrade.reason == "grade upgrade"
 
 
-def test_weak_market_only_allows_a_plus_or_better(tmp_path) -> None:
+def test_choppy_market_allows_strong_b_but_not_a(tmp_path) -> None:
     policy = make_policy(tmp_path)
     choppy = MarketRegime("choppy", 1.2, "normal", 0.05, False, "Weak trend")
     now = datetime(2026, 6, 9, 10, 0, tzinfo=EASTERN)
 
-    assert not policy.evaluate("AAPL", "B Watch Alert", 58, choppy, now).allowed
+    assert policy.evaluate("AAPL", "B Watch Alert", 52, choppy, now).allowed
     assert not policy.evaluate("MSFT", "A Signal", 63, choppy, now).allowed
     assert policy.evaluate("NVDA", "A+ Signal", 70, choppy, now).allowed
 
 
 def test_weak_b_score_is_rejected(tmp_path) -> None:
-    policy = make_policy(tmp_path, min_score_b=55)
-    decision = policy.evaluate("AAPL", "B Watch Alert", 54, normal_regime())
+    policy = make_policy(tmp_path, min_score_b=50)
+    decision = policy.evaluate("AAPL", "B Watch Alert", 49, normal_regime())
     assert not decision.allowed
     assert "strong-watch threshold" in decision.reason
+
+
+def test_moderate_bear_allows_strong_b(tmp_path) -> None:
+    policy = make_policy(tmp_path)
+    moderate_bear = MarketRegime(
+        "bear",
+        2.0,
+        "normal",
+        0.2,
+        False,
+        "Moderate bear",
+        regime_severity="moderate",
+    )
+    assert policy.evaluate("AAPL", "B Watch Alert", 51, moderate_bear).allowed
+
+
+def test_severe_bear_and_panic_remain_blocked(tmp_path) -> None:
+    policy = make_policy(tmp_path)
+    severe_bear = MarketRegime(
+        "bear",
+        5.0,
+        "high",
+        0.4,
+        False,
+        "Severe bear",
+        regime_severity="severe",
+    )
+    panic = MarketRegime(
+        "panic",
+        6.0,
+        "high",
+        0.5,
+        False,
+        "Panic",
+        regime_severity="panic",
+    )
+    assert not policy.evaluate("AAPL", "A++ Signal", 90, severe_bear).allowed
+    assert not policy.evaluate("NVDA", "A++ Signal", 90, panic).allowed

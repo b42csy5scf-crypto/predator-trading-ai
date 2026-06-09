@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 import time
+from collections import Counter
 from datetime import datetime, time as dt_time, timedelta, timezone
 from typing import Optional
 from zoneinfo import ZoneInfo
@@ -58,6 +59,9 @@ class PredatorTradingAI:
         self.circuit_breaker = CircuitBreaker(self.settings.watchdog_max_failures)
         self.state_store = RuntimeStateStore()
         self.state: RuntimeState = self.state_store.load()
+        self.scan_signals_generated = 0
+        self.scan_signals_suppressed = 0
+        self.scan_suppression_reasons: Counter[str] = Counter()
         self.watchlist = parse_watchlist(self.settings.watchlist)
         watchlist_issues = validate_watchlist(self.watchlist)
         if watchlist_issues:
@@ -134,6 +138,7 @@ class PredatorTradingAI:
 
     def run_iteration(self) -> None:
         self.logger.info("Starting market data iteration for %d tickers.", len(self.watchlist))
+        self.reset_scan_alert_summary()
         self.market_context = self.load_market_context()
         had_failure = False
         for ticker in self.watchlist:
@@ -155,6 +160,7 @@ class PredatorTradingAI:
             self.circuit_breaker.record_success(self.state)
             self.state_store.mark_scan(self.state)
             self.record_health("scanner", "ok", "iteration completed")
+        self.log_scan_alert_summary()
 
     def process_ticker(self, ticker: str) -> None:
         self.logger.info("Processing %s.", ticker)
@@ -211,6 +217,7 @@ class PredatorTradingAI:
         if not risk.approved:
             grade_candidate = setup.signal_tier
             reason = "; ".join(risk.reasons)
+            self.record_signal_suppressed(f"risk: {reason}")
             diagnostics = self.shadow_logger.diagnostics(ticker, bars, {**self.state.active_positions, **self.state.active_signals}, score=setup.score)
             self.shadow_logger.log(
                 ticker,
@@ -233,6 +240,7 @@ class PredatorTradingAI:
 
         alert_decision = self.alert_policy.evaluate(ticker, setup.signal_tier, setup.score, regime)
         if not alert_decision.allowed:
+            self.record_signal_suppressed(alert_decision.reason)
             self.logger.info(
                 "Telegram alert suppressed for %s grade=%s score=%.0f: %s",
                 ticker,
@@ -243,6 +251,7 @@ class PredatorTradingAI:
             return
         alert_key = self.alert_cooldown_key(ticker, setup.signal_tier)
         if self.state_store.is_on_cooldown(self.state, alert_key, self.alert_cooldown_seconds):
+            self.record_signal_suppressed("duplicate cooldown")
             self.logger.info("Skipping duplicate %s alert for %s due to cooldown.", setup.signal_tier, ticker)
             return
 
@@ -270,6 +279,7 @@ class PredatorTradingAI:
         self.state.last_telegram_alert = alert_key
         self.state_store.set_cooldown(self.state, alert_key)
         asyncio.run(self.telegram_bot.send_message(message))
+        self.record_signal_generated()
 
     def log_rejected_or_watch(
         self,
@@ -303,14 +313,18 @@ class PredatorTradingAI:
 
     def send_watch_alert(self, ticker: str, setup: StrategySetup, regime: MarketRegime) -> None:
         if not self.settings.enable_watchlist_alerts:
+            self.record_signal_suppressed("watchlist alerts disabled")
             return
         if setup.signal_tier == "B Watch Alert" and not self.settings.enable_b_alerts:
+            self.record_signal_suppressed("B alerts disabled")
             return
         if setup.signal_tier == "C Risky/Early Alert":
+            self.record_signal_suppressed("C alerts disabled")
             self.logger.info("Skipping Telegram alert for %s: C-grade alerts are disabled.", ticker)
             return
         alert_decision = self.alert_policy.evaluate(ticker, setup.signal_tier, setup.score, regime)
         if not alert_decision.allowed:
+            self.record_signal_suppressed(alert_decision.reason)
             self.logger.info(
                 "Telegram watch alert suppressed for %s grade=%s score=%.0f: %s",
                 ticker,
@@ -321,6 +335,7 @@ class PredatorTradingAI:
             return
         alert_key = self.alert_cooldown_key(ticker, setup.signal_tier)
         if self.state_store.is_on_cooldown(self.state, alert_key, self.alert_cooldown_seconds):
+            self.record_signal_suppressed("duplicate cooldown")
             return
         message = SignalEngine.format_watch_alert(setup, bear_regime=self.is_bear_watch_regime(regime))
         self.log_sent_alert(ticker, setup.signal_tier, "observe_only", setup.score, setup.setup_type, regime.regime, message)
@@ -329,6 +344,7 @@ class PredatorTradingAI:
         self.state.last_telegram_alert = alert_key
         self.state_store.set_cooldown(self.state, alert_key)
         asyncio.run(self.telegram_bot.send_message(message))
+        self.record_signal_generated()
 
     def process_active_signal_updates(self, ticker: str, current_price: float) -> None:
         updates = self.active_signal_tracker.check_ticker(ticker, current_price)
@@ -340,6 +356,30 @@ class PredatorTradingAI:
                 current_price,
             )
             asyncio.run(self.telegram_bot.send_message(update.message))
+
+    def reset_scan_alert_summary(self) -> None:
+        self.scan_signals_generated = 0
+        self.scan_signals_suppressed = 0
+        self.scan_suppression_reasons.clear()
+
+    def record_signal_generated(self) -> None:
+        self.scan_signals_generated += 1
+
+    def record_signal_suppressed(self, reason: str) -> None:
+        self.scan_signals_suppressed += 1
+        self.scan_suppression_reasons[reason] += 1
+
+    def log_scan_alert_summary(self) -> None:
+        reasons = ", ".join(
+            f"{reason}={count}"
+            for reason, count in self.scan_suppression_reasons.most_common()
+        ) or "none"
+        self.logger.info(
+            "Signal summary: generated=%d suppressed=%d suppression_reasons=%s",
+            self.scan_signals_generated,
+            self.scan_signals_suppressed,
+            reasons,
+        )
 
     @staticmethod
     def is_bear_watch_regime(regime: MarketRegime) -> bool:

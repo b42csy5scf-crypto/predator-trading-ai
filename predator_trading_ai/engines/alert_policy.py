@@ -41,9 +41,16 @@ class AlertPolicy:
         rank = GRADE_RANK.get(grade, -1)
         if rank < GRADE_RANK["B Watch Alert"]:
             return AlertDecision(False, "C-grade and unrecognized alerts are Telegram-disabled")
+        if regime.regime in {"panic", "high-volatility"} or regime.regime_severity in {"severe", "panic"}:
+            return AlertDecision(False, f"{regime.regime_severity} {regime.regime} regime is blocked")
         if grade == "B Watch Alert" and score < self.settings.min_score_b:
             return AlertDecision(False, f"B score below strong-watch threshold: {score:.0f}")
-        if self.is_weak_market(regime) and rank < GRADE_RANK["A+ Signal"]:
+        strong_b_exception = (
+            grade == "B Watch Alert"
+            and score >= self.settings.min_score_b
+            and (regime.regime == "choppy" or regime.regime_severity == "moderate")
+        )
+        if self.is_weak_market(regime) and rank < GRADE_RANK["A+ Signal"] and not strong_b_exception:
             return AlertDecision(False, f"{regime.regime} market requires A+ or A++")
 
         alert_date = self.alert_date(now)

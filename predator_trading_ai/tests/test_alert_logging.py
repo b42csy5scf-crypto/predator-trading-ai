@@ -83,3 +83,19 @@ def test_c_grade_watch_alert_is_not_sent_or_logged(tmp_path) -> None:
 
     rows = app.db.fetch_all("SELECT * FROM sent_alerts")
     assert rows == []
+
+
+def test_scan_alert_summary_counts_generated_and_suppressed(tmp_path) -> None:
+    settings = Settings(database_url=f"sqlite:///{tmp_path / 'summary.db'}")
+    app = PredatorTradingAI(settings)
+    app.reset_scan_alert_summary()
+
+    app.record_signal_generated()
+    app.record_signal_suppressed("duplicate cooldown")
+    app.record_signal_suppressed("duplicate cooldown")
+    app.record_signal_suppressed("C alerts disabled")
+
+    assert app.scan_signals_generated == 1
+    assert app.scan_signals_suppressed == 3
+    assert app.scan_suppression_reasons["duplicate cooldown"] == 2
+    assert app.scan_suppression_reasons["C alerts disabled"] == 1
