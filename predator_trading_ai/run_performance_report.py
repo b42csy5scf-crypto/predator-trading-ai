@@ -1,10 +1,7 @@
 import argparse
-import asyncio
 
-from predator_trading_ai.alerts.telegram_bot import TelegramAlertBot
 from predator_trading_ai.config import get_settings
-from predator_trading_ai.database.db import Database
-from predator_trading_ai.reports.trade_performance_report import TradePerformanceReport
+from predator_trading_ai.reports.report_runner import PerformanceReportRunner
 
 
 def parse_args() -> argparse.Namespace:
@@ -16,12 +13,13 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     settings = get_settings()
-    db = Database(settings)
-    db.initialize()
-    report = TradePerformanceReport(db).build()
-    print(report)
+    runner = PerformanceReportRunner(settings)
     if args.telegram:
-        asyncio.run(TelegramAlertBot(settings, db).send_message(report))
+        result = runner.build_and_send_sync()
+        print(result.report)
+        print(f"Telegram sent: {result.sent}")
+        return
+    print(runner.build())
 
 
 if __name__ == "__main__":

@@ -1,3 +1,4 @@
+import threading
 from typing import Optional
 
 from predator_trading_ai.config import Settings, get_settings
@@ -11,6 +12,7 @@ class TelegramAlertBot:
         self.settings = settings or get_settings()
         self.db = db or Database(self.settings)
         self.logger = setup_logger(__name__, self.settings.log_level)
+        self._command_thread: Optional[threading.Thread] = None
 
     async def send_signal(self, signal: TradingSignal, label: str = "Signal") -> None:
         await self.send_message(SignalEngine.format_alert(signal, label=label))
@@ -26,13 +28,46 @@ class TelegramAlertBot:
             chat_ids = self.configured_chat_ids()
             sent = False
             for chat_id in chat_ids:
-                await bot.send_message(chat_id=chat_id, text=text)
+                for chunk in self._telegram_chunks(text):
+                    await bot.send_message(chat_id=chat_id, text=chunk)
                 sent = True
             if not sent:
                 self.logger.info("Telegram chat id missing; alert not sent: %s", text[:120])
             
         except Exception as exc:
             self.logger.exception("Telegram send failed: %s", exc)
+
+    def start_command_polling(self) -> None:
+        if self._command_thread and self._command_thread.is_alive():
+            return
+        if not self.settings.telegram_bot_token:
+            self.logger.info("Telegram bot token missing; command polling disabled.")
+            return
+        self._command_thread = threading.Thread(target=self._run_command_polling, daemon=True)
+        self._command_thread.start()
+
+    def _run_command_polling(self) -> None:
+        try:
+            from telegram.ext import Application, CommandHandler
+
+            async def report(update, context) -> None:
+                from predator_trading_ai.reports.report_runner import PerformanceReportRunner
+
+                chat_id = str(update.effective_chat.id) if update.effective_chat else ""
+                if chat_id not in self.configured_chat_ids():
+                    await update.message.reply_text("Unauthorized.")
+                    return
+                await update.message.reply_text("Generating Predator performance report...")
+                result = await PerformanceReportRunner(self.settings, self.db).build_and_send()
+                if not result.sent:
+                    await update.message.reply_text("Report generated, but Telegram recipients are not configured.")
+
+            application = Application.builder().token(self.settings.telegram_bot_token).build()
+            application.add_handler(CommandHandler("report", report))
+            self.logger.info("Telegram admin command polling started.")
+            application.run_polling(close_loop=False, stop_signals=None)
+        except Exception as exc:
+            self.logger.exception("Telegram command polling stopped: %s", exc)
 
     def configured_chat_ids(self) -> list[str]:
         primary = self._split_chat_ids(getattr(self.settings, "telegram_chat_id", None))
@@ -49,6 +84,22 @@ class TelegramAlertBot:
         if not value:
             return []
         return [part.strip() for part in str(value).split(",") if part.strip()]
+
+    @staticmethod
+    def _telegram_chunks(text: str, limit: int = 3900) -> list[str]:
+        if len(text) <= limit:
+            return [text]
+        chunks: list[str] = []
+        current = ""
+        for line in text.splitlines():
+            addition = f"{line}\n"
+            if len(current) + len(addition) > limit and current:
+                chunks.append(current.rstrip())
+                current = ""
+            current += addition
+        if current:
+            chunks.append(current.rstrip())
+        return chunks
 
     def command_status(self) -> str:
         live = "ON" if self.settings.live_trading else "OFF"
