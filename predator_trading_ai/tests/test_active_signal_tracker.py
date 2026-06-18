@@ -40,6 +40,10 @@ def test_active_signal_tp_tracking_and_no_duplicate_messages(tmp_path) -> None:
     assert row["close_reason"] == "tp3_completed"
     updates = db.fetch_all("SELECT update_type FROM signal_updates WHERE active_signal_id = ? ORDER BY id", [signal_id])
     assert [row["update_type"] for row in updates] == ["tp1", "tp2", "tp3"]
+    completed = db.fetch_all("SELECT * FROM completed_trades WHERE active_signal_id = ?", [signal_id])[0]
+    assert completed["outcome"] == "TP3"
+    assert completed["status"] == "closed"
+    assert completed["r_multiple"] > 0
 
 
 def test_active_signal_stop_loss_tracking(tmp_path) -> None:
@@ -55,6 +59,25 @@ def test_active_signal_stop_loss_tracking(tmp_path) -> None:
     row = db.fetch_all("SELECT * FROM active_signals WHERE id = ?", [signal_id])[0]
     assert row["status"] == "closed"
     assert row["close_reason"] == "invalidated"
+    completed = db.fetch_all("SELECT * FROM completed_trades WHERE active_signal_id = ?", [signal_id])[0]
+    assert completed["outcome"] == "SL"
+    assert completed["status"] == "closed"
+    assert completed["r_multiple"] == -1.0
+
+
+def test_active_signal_tp1_tp2_progress_updates_completed_trades(tmp_path) -> None:
+    tracker, db = make_tracker(tmp_path)
+    signal_id = register_signal(tracker)
+
+    tracker.check_ticker("NVDA", 128.55)
+    first = db.fetch_all("SELECT * FROM completed_trades WHERE active_signal_id = ?", [signal_id])[0]
+    assert first["outcome"] == "TP1"
+    assert first["status"] == "active"
+
+    tracker.check_ticker("NVDA", 130.10)
+    second = db.fetch_all("SELECT * FROM completed_trades WHERE active_signal_id = ?", [signal_id])[0]
+    assert second["outcome"] == "TP2"
+    assert second["status"] == "active"
 
 
 def test_new_grade_supersedes_previous_active_signal(tmp_path) -> None:

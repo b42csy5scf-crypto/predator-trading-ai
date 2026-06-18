@@ -103,6 +103,7 @@ class ActiveSignalTracker:
         if stop_hit:
             update = self._create_update(row, "stop_loss", current_price, "closed")
             self._close(signal_id, current_price, "invalidated")
+            self._record_completed_trade(row, "SL", "closed", current_price, "stop_loss")
             return [update] if update else []
 
         updates = []
@@ -118,6 +119,7 @@ class ActiveSignalTracker:
                 f"UPDATE active_signals SET {flag} = 1, last_price = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
                 [current_price, signal_id],
             )
+            self._record_completed_trade(row, f"TP{number}", status, current_price)
         if any(update.update_type == "tp3" for update in updates):
             self._close(signal_id, current_price, "tp3_completed")
         elif updates:
@@ -179,6 +181,85 @@ class ActiveSignalTracker:
             """,
             [price, reason, signal_id],
         )
+
+    def _record_completed_trade(
+        self,
+        row,
+        outcome: str,
+        status: str,
+        price: float,
+        stop_loss_reason: str | None = None,
+    ) -> None:
+        signal_id = int(row["id"])
+        entry = (float(row["entry_zone_low"]) + float(row["entry_zone_high"])) / 2
+        risk = abs(entry - float(row["stop_loss"]))
+        r_multiple = self._outcome_r_multiple(row, outcome, risk, entry)
+        alert = self._matching_sent_alert(row)
+        closed_at = "CURRENT_TIMESTAMP" if status == "closed" else "NULL"
+        self.db.execute(
+            f"""
+            INSERT INTO completed_trades (
+                active_signal_id, ticker, grade, direction,
+                entry_zone_low, entry_zone_high, entry_price, stop_loss,
+                tp1, tp2, tp3, outcome, status, opened_at, closed_at,
+                close_price, r_multiple, regime, score, stop_loss_reason
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, {closed_at}, ?, ?, ?, ?, ?)
+            ON CONFLICT(active_signal_id) DO UPDATE SET
+                updated_at = CURRENT_TIMESTAMP,
+                outcome = excluded.outcome,
+                status = excluded.status,
+                closed_at = CASE WHEN excluded.status = 'closed' THEN CURRENT_TIMESTAMP ELSE completed_trades.closed_at END,
+                close_price = excluded.close_price,
+                r_multiple = excluded.r_multiple,
+                regime = COALESCE(excluded.regime, completed_trades.regime),
+                score = COALESCE(excluded.score, completed_trades.score),
+                stop_loss_reason = COALESCE(excluded.stop_loss_reason, completed_trades.stop_loss_reason)
+            """,
+            [
+                signal_id,
+                row["ticker"],
+                row["grade"],
+                row["direction"],
+                float(row["entry_zone_low"]),
+                float(row["entry_zone_high"]),
+                entry,
+                float(row["stop_loss"]),
+                float(row["tp1"]),
+                float(row["tp2"]),
+                float(row["tp3"]),
+                outcome,
+                status,
+                row["sent_at"],
+                price,
+                r_multiple,
+                alert["regime"] if alert else None,
+                float(alert["score"]) if alert and alert["score"] is not None else None,
+                stop_loss_reason,
+            ],
+        )
+
+    @staticmethod
+    def _outcome_r_multiple(row, outcome: str, risk: float, entry: float) -> float:
+        if risk <= 0:
+            return 0.0
+        if outcome == "SL":
+            return -1.0
+        target_key = outcome.lower()
+        return round(abs(float(row[target_key]) - entry) / risk, 3)
+
+    def _matching_sent_alert(self, row):
+        rows = self.db.fetch_all(
+            """
+            SELECT *
+            FROM sent_alerts
+            WHERE ticker = ? AND grade = ?
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            [row["ticker"], row["grade"]],
+        )
+        return rows[0] if rows else None
 
     @staticmethod
     def short_grade(grade: str) -> str:

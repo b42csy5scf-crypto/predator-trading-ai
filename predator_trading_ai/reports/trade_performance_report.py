@@ -52,6 +52,7 @@ class TradePerformanceReport:
         sections = [
             "Predator Trading AI Performance Analytics",
             "",
+            self._section("Telegram Summary", self._telegram_summary(outcomes)),
             self._section("By Grade", self._metrics_by_grade(outcomes)),
             self._section("By Score Range", self._metrics_by_score(outcomes)),
             self._section("By Regime", self._metrics_by_regime(outcomes)),
@@ -64,48 +65,132 @@ class TradePerformanceReport:
         return "\n".join(sections)
 
     def load_outcomes(self) -> list[SignalOutcome]:
-        active_rows = self.db.fetch_all(
+        self.backfill_completed_trades()
+        completed_rows = self.db.fetch_all(
             """
             SELECT *
-            FROM active_signals
+            FROM completed_trades
             WHERE status = 'closed'
-              AND close_reason IN ('tp3_completed', 'invalidated')
-            ORDER BY sent_at
+            ORDER BY opened_at
             """
         )
-        sent_rows = self.db.fetch_all("SELECT * FROM sent_alerts ORDER BY created_at")
         shadow_rows = self.db.fetch_all("SELECT * FROM shadow_signals ORDER BY created_at")
         rejected_rows = self.db.fetch_all("SELECT * FROM rejected_signals ORDER BY created_at")
 
         outcomes: list[SignalOutcome] = []
-        for row in active_rows:
-            alert = self._match_sent_alert(row, sent_rows)
-            shadow_context = self._nearest_context(row["ticker"], row["sent_at"], shadow_rows, rejected_rows)
-            r_multiple = self._r_multiple(row)
-            lost = row["close_reason"] == "invalidated"
+        for row in completed_rows:
+            shadow_context = self._nearest_context(row["ticker"], row["opened_at"], shadow_rows, rejected_rows)
+            r_multiple = float(row["r_multiple"] or 0)
+            lost = row["outcome"] == "SL"
             outcomes.append(
                 SignalOutcome(
                     ticker=row["ticker"],
                     grade=row["grade"],
-                    score=float(alert["score"]) if alert and alert["score"] is not None else None,
-                    regime=str(alert["regime"] if alert and alert["regime"] else "unknown"),
+                    score=float(row["score"]) if row["score"] is not None else None,
+                    regime=str(row["regime"] or "unknown"),
                     sector=SECTOR_BY_TICKER.get(str(row["ticker"]).upper(), "Unknown"),
-                    status=row["close_reason"],
+                    status=row["outcome"],
                     r_multiple=r_multiple,
                     won=r_multiple > 0,
                     lost=lost,
                     loss_context=" ".join(
                         part
                         for part in [
-                            str(alert["message"] if alert else ""),
+                            str(row["stop_loss_reason"] or ""),
                             shadow_context,
-                            str(row["close_reason"] or ""),
+                            str(row["outcome"] or ""),
                         ]
                         if part
                     ).lower(),
                 )
             )
         return outcomes
+
+    def backfill_completed_trades(self) -> None:
+        active_rows = self.db.fetch_all(
+            """
+            SELECT a.*,
+                   u.update_type AS terminal_update_type,
+                   u.price AS terminal_update_price,
+                   u.created_at AS terminal_update_time
+            FROM active_signals a
+            LEFT JOIN signal_updates u
+              ON u.active_signal_id = a.id
+             AND u.update_type IN ('tp3', 'stop_loss')
+            WHERE (
+                  (a.status = 'closed' AND a.close_reason IN ('tp3_completed', 'invalidated'))
+                  OR u.id IS NOT NULL
+              )
+              AND a.id NOT IN (
+                  SELECT COALESCE(active_signal_id, -1) FROM completed_trades
+              )
+            ORDER BY a.sent_at
+            """
+        )
+        sent_rows = self.db.fetch_all("SELECT * FROM sent_alerts ORDER BY created_at")
+        for row in active_rows:
+            alert = self._match_sent_alert(row, sent_rows)
+            terminal_update = str(row["terminal_update_type"] or "")
+            outcome = "SL" if row["close_reason"] == "invalidated" or terminal_update == "stop_loss" else "TP3"
+            r_multiple = self._r_multiple(row)
+            if terminal_update == "stop_loss":
+                r_multiple = -1.0
+            entry = (float(row["entry_zone_low"]) + float(row["entry_zone_high"])) / 2
+            self.db.insert_dict(
+                "completed_trades",
+                {
+                    "active_signal_id": row["id"],
+                    "ticker": row["ticker"],
+                    "grade": row["grade"],
+                    "direction": row["direction"],
+                    "entry_zone_low": row["entry_zone_low"],
+                    "entry_zone_high": row["entry_zone_high"],
+                    "entry_price": entry,
+                    "stop_loss": row["stop_loss"],
+                    "tp1": row["tp1"],
+                    "tp2": row["tp2"],
+                    "tp3": row["tp3"],
+                    "outcome": outcome,
+                    "status": "closed",
+                    "opened_at": row["sent_at"],
+                    "closed_at": row["closed_at"] or row["terminal_update_time"],
+                    "close_price": row["last_price"] or row["terminal_update_price"],
+                    "r_multiple": r_multiple,
+                    "regime": alert["regime"] if alert else None,
+                    "score": alert["score"] if alert else None,
+                    "stop_loss_reason": "stop_loss" if outcome == "SL" else None,
+                },
+            )
+
+    def _telegram_summary(self, outcomes: list[SignalOutcome]) -> list[str]:
+        total = len(outcomes)
+        wins = len([item for item in outcomes if item.won])
+        losses = len([item for item in outcomes if item.lost])
+        win_rate = self._win_rate(outcomes)
+        by_grade = {grade: [item for item in outcomes if item.grade == grade] for grade in GRADE_ORDER}
+        non_empty_grades = [item for item in by_grade.items() if item[1]]
+        ranked = sorted(
+            non_empty_grades,
+            key=lambda pair: (self._win_rate(pair[1]), self._avg_r(pair[1]), len(pair[1])),
+            reverse=True,
+        )
+        best_grade = ranked[0][0] if ranked else "n/a"
+        worst_ranked = sorted(
+            non_empty_grades,
+            key=lambda pair: (self._win_rate(pair[1]), self._avg_r(pair[1])),
+        )
+        worst_grade = worst_ranked[0][0] if worst_ranked else "n/a"
+        loss_reasons = self._loss_reasons(outcomes)
+        common_stop = loss_reasons[0] if loss_reasons and loss_reasons[0] != "No losses recorded." else "n/a"
+        return [
+            f"Total completed trades: {total}",
+            f"Wins: {wins}",
+            f"Losses: {losses}",
+            f"Win rate: {win_rate:.1f}%",
+            f"Best grade: {best_grade}",
+            f"Worst grade: {worst_grade}",
+            f"Most common stop-loss reason: {common_stop}",
+        ]
 
     def _metrics_by_grade(self, outcomes: list[SignalOutcome]) -> list[str]:
         lines = [self._header("Grade")]

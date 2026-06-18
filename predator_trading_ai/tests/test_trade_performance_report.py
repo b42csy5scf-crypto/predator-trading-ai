@@ -90,6 +90,12 @@ def test_trade_performance_report_breakdowns_and_recommendations(tmp_path) -> No
 
     report = TradePerformanceReport(db).build()
 
+    assert "Telegram Summary" in report
+    assert "Total completed trades: 2" in report
+    assert "Wins: 1" in report
+    assert "Losses: 1" in report
+    assert "Best grade: A+ Signal" in report
+    assert "Worst grade: B Watch Alert" in report
     assert "By Grade" in report
     assert "A+ Signal" in report
     assert "B Watch Alert" in report
@@ -103,6 +109,76 @@ def test_trade_performance_report_breakdowns_and_recommendations(tmp_path) -> No
     assert "Real Estate" in report
     assert "weak volume: 1" in report
     assert "Do not auto-activate improvements" in report
+
+
+def test_report_reads_completed_trades_table_directly(tmp_path) -> None:
+    db = make_db(tmp_path)
+    db.insert_dict(
+        "completed_trades",
+        {
+            "active_signal_id": 100,
+            "ticker": "AAPL",
+            "grade": "A++ Signal",
+            "direction": "long",
+            "entry_zone_low": 100,
+            "entry_zone_high": 101,
+            "entry_price": 100.5,
+            "stop_loss": 98,
+            "tp1": 104,
+            "tp2": 106,
+            "tp3": 108,
+            "outcome": "TP3",
+            "status": "closed",
+            "opened_at": "2026-06-18T14:30:00+00:00",
+            "closed_at": "2026-06-18T15:30:00+00:00",
+            "close_price": 108,
+            "r_multiple": 3.0,
+            "regime": "bull-trend",
+            "score": 82,
+        },
+    )
+    report = TradePerformanceReport(db).build()
+    assert "Total completed trades: 1" in report
+    assert "A++ Signal" in report
+    assert "75+" in report
+
+
+def test_report_backfills_from_terminal_signal_updates(tmp_path) -> None:
+    db = make_db(tmp_path)
+    signal_id = db.insert_dict(
+        "active_signals",
+        {
+            "ticker": "PLD",
+            "grade": "B Watch Alert",
+            "direction": "long",
+            "entry_zone_low": 100,
+            "entry_zone_high": 101,
+            "stop_loss": 98,
+            "tp1": 104,
+            "tp2": 106,
+            "tp3": 108,
+            "sent_at": "2026-06-18T14:30:00+00:00",
+            "status": "active",
+        },
+    )
+    db.insert_dict(
+        "signal_updates",
+        {
+            "active_signal_id": signal_id,
+            "ticker": "PLD",
+            "update_type": "stop_loss",
+            "price": 97.9,
+            "status": "closed",
+            "message": "Stop loss hit",
+        },
+    )
+
+    report = TradePerformanceReport(db).build()
+    rows = db.fetch_all("SELECT * FROM completed_trades WHERE active_signal_id = ?", [signal_id])
+    assert len(rows) == 1
+    assert rows[0]["outcome"] == "SL"
+    assert "Total completed trades: 1" in report
+    assert "Losses: 1" in report
 
 
 def test_trade_performance_report_empty_state(tmp_path) -> None:
