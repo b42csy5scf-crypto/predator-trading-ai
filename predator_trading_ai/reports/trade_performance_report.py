@@ -49,10 +49,14 @@ class TradePerformanceReport:
         if not outcomes:
             return "Predator Trading AI Performance Analytics\nNo completed signal outcomes found yet."
 
+        trade_candidates = [item for item in outcomes if item.grade in {"A++ Signal", "A+ Signal", "A Signal"}]
+        watch_alerts = [item for item in outcomes if item.grade == "B Watch Alert"]
         sections = [
             "Predator Trading AI Performance Analytics",
             "",
             self._section("Telegram Summary", self._telegram_summary(outcomes)),
+            self._section("Trade Candidates (A/A+/A++)", self._metric_block(trade_candidates)),
+            self._section("Watch Alerts (B, Separate)", self._metric_block(watch_alerts)),
             self._section("By Grade", self._metrics_by_grade(outcomes)),
             self._section("By Score Range", self._metrics_by_score(outcomes)),
             self._section("By Regime", self._metrics_by_regime(outcomes)),
@@ -116,9 +120,9 @@ class TradePerformanceReport:
             FROM active_signals a
             LEFT JOIN signal_updates u
               ON u.active_signal_id = a.id
-             AND u.update_type IN ('tp3', 'stop_loss')
+             AND u.update_type IN ('tp3', 'stop_loss', 'breakeven')
             WHERE (
-                  (a.status = 'closed' AND a.close_reason IN ('tp3_completed', 'invalidated'))
+                  (a.status = 'closed' AND a.close_reason IN ('tp3_completed', 'invalidated', 'breakeven_after_tp1'))
                   OR u.id IS NOT NULL
               )
               AND a.id NOT IN (
@@ -131,11 +135,19 @@ class TradePerformanceReport:
         for row in active_rows:
             alert = self._match_sent_alert(row, sent_rows)
             terminal_update = str(row["terminal_update_type"] or "")
-            outcome = "SL" if row["close_reason"] == "invalidated" or terminal_update == "stop_loss" else "TP3"
+            if row["close_reason"] == "breakeven_after_tp1" or terminal_update == "breakeven":
+                outcome = "BE"
+            elif row["close_reason"] == "invalidated" or terminal_update == "stop_loss":
+                outcome = "SL"
+            else:
+                outcome = "TP3"
             r_multiple = self._r_multiple(row)
             if terminal_update == "stop_loss":
                 r_multiple = -1.0
+            if terminal_update == "breakeven":
+                r_multiple = 0.0
             entry = (float(row["entry_zone_low"]) + float(row["entry_zone_high"])) / 2
+            original_stop = row["original_stop_loss"] if "original_stop_loss" in row.keys() and row["original_stop_loss"] is not None else row["stop_loss"]
             self.db.insert_dict(
                 "completed_trades",
                 {
@@ -146,7 +158,7 @@ class TradePerformanceReport:
                     "entry_zone_low": row["entry_zone_low"],
                     "entry_zone_high": row["entry_zone_high"],
                     "entry_price": entry,
-                    "stop_loss": row["stop_loss"],
+                    "stop_loss": original_stop,
                     "tp1": row["tp1"],
                     "tp2": row["tp2"],
                     "tp3": row["tp3"],
@@ -158,7 +170,7 @@ class TradePerformanceReport:
                     "r_multiple": r_multiple,
                     "regime": alert["regime"] if alert else None,
                     "score": alert["score"] if alert else None,
-                    "stop_loss_reason": "stop_loss" if outcome == "SL" else None,
+                    "stop_loss_reason": "stop_loss" if outcome == "SL" else ("breakeven_after_tp1" if outcome == "BE" else None),
                 },
             )
 
@@ -184,6 +196,8 @@ class TradePerformanceReport:
         common_stop = loss_reasons[0] if loss_reasons and loss_reasons[0] != "No losses recorded." else "n/a"
         return [
             f"Total completed trades: {total}",
+            f"Trade candidates: {len([item for item in outcomes if item.grade in {'A++ Signal', 'A+ Signal', 'A Signal'}])}",
+            f"Watch alerts: {len([item for item in outcomes if item.grade == 'B Watch Alert'])}",
             f"Wins: {wins}",
             f"Losses: {losses}",
             f"Win rate: {win_rate:.1f}%",
@@ -197,6 +211,9 @@ class TradePerformanceReport:
         for grade in GRADE_ORDER:
             lines.append(self._metric_line(grade, [item for item in outcomes if item.grade == grade]))
         return lines
+
+    def _metric_block(self, outcomes: list[SignalOutcome]) -> list[str]:
+        return [self._header("Group"), self._metric_line("Total", outcomes)]
 
     def _metrics_by_score(self, outcomes: list[SignalOutcome]) -> list[str]:
         lines = [self._header("Score")]
@@ -316,6 +333,8 @@ class TradePerformanceReport:
             return 0.0
         if row["close_reason"] == "invalidated":
             return -1.0
+        if row["close_reason"] == "breakeven_after_tp1":
+            return 0.0
         if row["close_reason"] == "tp3_completed":
             return round(abs(float(row["tp3"]) - entry) / risk, 3)
         if int(row["tp2_hit"] or 0):

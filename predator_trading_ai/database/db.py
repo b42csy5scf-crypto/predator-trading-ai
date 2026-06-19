@@ -24,7 +24,19 @@ class Database:
         schema_path = Path(__file__).with_name("schema.sql")
         with self.connect() as conn:
             conn.executescript(schema_path.read_text(encoding="utf-8"))
+            self._apply_migrations(conn)
         self.logger.info("SQLite schema initialized at %s", self.path)
+
+    def _apply_migrations(self, conn: sqlite3.Connection) -> None:
+        self._add_column_if_missing(conn, "active_signals", "original_stop_loss", "REAL")
+        self._add_column_if_missing(conn, "active_signals", "breakeven_active", "INTEGER NOT NULL DEFAULT 0")
+        self._add_column_if_missing(conn, "active_signals", "breakeven_price", "REAL")
+
+    @staticmethod
+    def _add_column_if_missing(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
+        existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+        if column not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
     def execute(self, sql: str, params: Iterable[Any] = ()) -> int:
         with self.connect() as conn:

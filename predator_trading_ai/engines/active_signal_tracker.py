@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional
 
+from predator_trading_ai.config import Settings, get_settings
 from predator_trading_ai.database.db import Database
 from predator_trading_ai.engines.signal_engine import TradingSignal
 from predator_trading_ai.engines.strategy_engine import StrategySetup
@@ -18,8 +19,9 @@ class SignalUpdate:
 
 
 class ActiveSignalTracker:
-    def __init__(self, db: Database) -> None:
+    def __init__(self, db: Database, settings: Optional[Settings] = None) -> None:
         self.db = db
+        self.settings = settings or get_settings()
 
     def register_trading_signal(self, signal: TradingSignal, grade: str) -> int:
         return self.register(
@@ -72,6 +74,7 @@ class ActiveSignalTracker:
                 "entry_zone_low": entry_zone_low,
                 "entry_zone_high": entry_zone_high,
                 "stop_loss": stop_loss,
+                "original_stop_loss": stop_loss,
                 "tp1": targets[0],
                 "tp2": targets[1],
                 "tp3": targets[2],
@@ -93,12 +96,22 @@ class ActiveSignalTracker:
     def _evaluate_row(self, row, current_price: float) -> list[SignalUpdate]:
         signal_id = int(row["id"])
         direction = row["direction"]
+        entry = self._entry_price(row)
+        breakeven_active = int(row["breakeven_active"] or 0) == 1
         if direction == "short":
             stop_hit = current_price >= float(row["stop_loss"])
+            breakeven_hit = breakeven_active and current_price >= float(row["breakeven_price"] or entry)
             target_hit = lambda target: current_price <= float(target)
         else:
             stop_hit = current_price <= float(row["stop_loss"])
+            breakeven_hit = breakeven_active and current_price <= float(row["breakeven_price"] or entry)
             target_hit = lambda target: current_price >= float(target)
+
+        if breakeven_hit:
+            update = self._create_update(row, "breakeven", current_price, "closed")
+            self._close(signal_id, current_price, "breakeven_after_tp1")
+            self._record_completed_trade(row, "BE", "closed", current_price, "breakeven_after_tp1")
+            return [update] if update else []
 
         if stop_hit:
             update = self._create_update(row, "stop_loss", current_price, "closed")
@@ -120,6 +133,8 @@ class ActiveSignalTracker:
                 [current_price, signal_id],
             )
             self._record_completed_trade(row, f"TP{number}", status, current_price)
+            if number == 1 and self.settings.move_stop_to_breakeven_after_tp1:
+                self._move_stop_to_breakeven(row, current_price)
         if any(update.update_type == "tp3" for update in updates):
             self._close(signal_id, current_price, "tp3_completed")
         elif updates:
@@ -142,10 +157,15 @@ class ActiveSignalTracker:
             "tp2": "TP2 Hit",
             "tp3": "TP3 Hit",
             "stop_loss": "Stop Loss Hit",
+            "breakeven": "Breakeven Exit After TP1",
         }[update_type]
         if update_type == "stop_loss":
             detail = f"Stop: {float(row['stop_loss']):.2f}"
             status_line = "Closed / Invalidated"
+        elif update_type == "breakeven":
+            entry = self._entry_price(row)
+            detail = f"Breakeven: {entry:.2f}"
+            status_line = "Closed / Breakeven exit after TP1"
         else:
             detail = f"{update_type.upper()}: {float(row[update_type]):.2f}"
             status_line = "Closed / Signal completed" if update_type == "tp3" else f"Active / {update_type.upper()} reached"
@@ -171,6 +191,18 @@ class ActiveSignalTracker:
         )
         return SignalUpdate(signal_id, row["ticker"], update_type, price, status, message)
 
+    def _move_stop_to_breakeven(self, row, price: float) -> None:
+        entry = self._entry_price(row)
+        self.db.execute(
+            """
+            UPDATE active_signals
+            SET stop_loss = ?, breakeven_active = 1, breakeven_price = ?,
+                last_price = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            [entry, entry, price, int(row["id"])],
+        )
+
     def _close(self, signal_id: int, price: float, reason: str) -> None:
         self.db.execute(
             """
@@ -191,8 +223,9 @@ class ActiveSignalTracker:
         stop_loss_reason: str | None = None,
     ) -> None:
         signal_id = int(row["id"])
-        entry = (float(row["entry_zone_low"]) + float(row["entry_zone_high"])) / 2
-        risk = abs(entry - float(row["stop_loss"]))
+        entry = self._entry_price(row)
+        original_stop = self._original_stop_loss(row)
+        risk = abs(entry - original_stop)
         r_multiple = self._outcome_r_multiple(row, outcome, risk, entry)
         alert = self._matching_sent_alert(row)
         closed_at = "CURRENT_TIMESTAMP" if status == "closed" else "NULL"
@@ -224,7 +257,7 @@ class ActiveSignalTracker:
                 float(row["entry_zone_low"]),
                 float(row["entry_zone_high"]),
                 entry,
-                float(row["stop_loss"]),
+                original_stop,
                 float(row["tp1"]),
                 float(row["tp2"]),
                 float(row["tp3"]),
@@ -243,10 +276,24 @@ class ActiveSignalTracker:
     def _outcome_r_multiple(row, outcome: str, risk: float, entry: float) -> float:
         if risk <= 0:
             return 0.0
+        if outcome == "BE":
+            return 0.0
         if outcome == "SL":
             return -1.0
         target_key = outcome.lower()
         return round(abs(float(row[target_key]) - entry) / risk, 3)
+
+    @staticmethod
+    def _entry_price(row) -> float:
+        return (float(row["entry_zone_low"]) + float(row["entry_zone_high"])) / 2
+
+    @staticmethod
+    def _original_stop_loss(row) -> float:
+        try:
+            value = row["original_stop_loss"]
+        except (KeyError, IndexError):
+            value = None
+        return float(value) if value is not None else float(row["stop_loss"])
 
     def _matching_sent_alert(self, row):
         rows = self.db.fetch_all(

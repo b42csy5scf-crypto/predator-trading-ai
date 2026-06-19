@@ -21,6 +21,7 @@ class StrategySetup:
     reason: str
     do_not_enter_conditions: list[str]
     signal_tier: str = "A Signal"
+    confirmations: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -119,6 +120,7 @@ class StrategyEngine:
                 "spread widens beyond configured limit",
             ],
             signal_tier=tier,
+            confirmations=best.confirmations,
         )
 
     def _score_threshold(self, regime: MarketRegime) -> float:
@@ -147,6 +149,8 @@ class StrategyEngine:
         ema_21 = float(latest.get("ema_21", close))
         ema_50 = float(latest.get("ema_50", close))
         ema_200 = float(latest.get("ema_200", close))
+        macd = float(latest.get("macd", 0) or 0)
+        macd_signal = float(latest.get("macd_signal", 0) or 0)
         volume_ratio = float(latest.get("relative_volume", 0) or 0)
         return_20 = float(latest.get("return_20", 0) or 0)
         rsi = float(latest.get("rsi_14", 50) or 50)
@@ -155,15 +159,18 @@ class StrategyEngine:
 
         score = 0.0
         reasons = []
+        confirmations: list[str] = []
         soft_rejections = []
         if close > ema_50:
             score += 10
             reasons.append("price above EMA50")
+            confirmations.append("price above EMA50")
         else:
             soft_rejections.append("price below EMA50")
         if ema_50 >= ema_200:
             score += 8
             reasons.append("EMA50 above EMA200")
+            confirmations.append("EMA50 above EMA200")
         else:
             soft_rejections.append("EMA50 below EMA200")
         if close > ema_50 >= ema_200:
@@ -182,9 +189,10 @@ class StrategyEngine:
             reasons.append("already probing breakout area")
         else:
             soft_rejections.append(f"not near breakout: {distance_to_breakout:.2f} ATR away")
-        if volume_ratio >= 0.8:
+        if volume_ratio >= self.settings.b_min_rel_volume:
             score += 10
             reasons.append(f"volume rising {volume_ratio:.2f}x")
+            confirmations.append(f"relative volume >= {self.settings.b_min_rel_volume:.2f}")
         elif volume_ratio >= 0.55:
             score += 5
             reasons.append(f"low but usable volume {volume_ratio:.2f}x")
@@ -194,6 +202,8 @@ class StrategyEngine:
         if 42 <= rsi <= 72:
             score += 6
             reasons.append(f"RSI in tradable zone {rsi:.1f}")
+            if 45 <= rsi <= 65:
+                confirmations.append("RSI between 45 and 65")
         else:
             soft_rejections.append(f"RSI outside preferred zone: {rsi:.1f}")
         if distance_from_ema21 <= 2.75:
@@ -204,8 +214,23 @@ class StrategyEngine:
         if return_20 > 0:
             score += min(return_20, 12) * 0.5
             reasons.append(f"positive 20-bar strength {return_20:.1f}%")
+            confirmations.append("positive 20-bar strength")
         else:
             soft_rejections.append(f"negative 20-bar strength {return_20:.1f}%")
+        if -0.75 <= distance_to_breakout <= 2.5:
+            confirmations.append("near 20-bar breakout")
+        if macd > macd_signal:
+            score += 4
+            reasons.append("MACD momentum improving")
+            confirmations.append("MACD momentum improving")
+        else:
+            soft_rejections.append("MACD momentum not confirmed")
+        if self._benchmark_is_healthy(regime):
+            score += 4
+            reasons.append("SPY/QQQ healthy")
+            confirmations.append("SPY or QQQ is positive/healthy")
+        else:
+            soft_rejections.append("SPY/QQQ not healthy")
 
         if regime.regime == "bull-trend":
             score += 5
@@ -217,9 +242,9 @@ class StrategyEngine:
             score -= 6
             soft_rejections.append(f"soft regime warning: {regime.regime}")
 
-        score = round(clamp(score, 0, self.settings.min_score_a - 0.01), 2)
-        tier = self.grade_for_score(score)
-        if score < self.settings.min_score_c or score >= self.settings.min_score_a:
+        score = round(clamp(score, 0, 100), 2)
+        tier = "B Watch Alert" if score >= self.settings.min_score_b else "C Risky/Early Alert"
+        if score < self.settings.min_score_c:
             reason = "; ".join(soft_rejections or reasons or ["score below watch threshold"])
             return WatchEvaluation(None, score, tier, "score", reason)
         if tier == "B Watch Alert" and not self.settings.enable_b_alerts:
@@ -235,6 +260,7 @@ class StrategyEngine:
             score,
             reason,
             signal_tier=tier,
+            confirmations=tuple(dict.fromkeys(confirmations)),
         )
         return WatchEvaluation(setup, score, tier, "none", reason)
 
@@ -249,6 +275,10 @@ class StrategyEngine:
         if regime.regime in {"bear", "bear-trend"}:
             return regime.regime_severity in {"severe", "panic"}
         return False
+
+    @staticmethod
+    def _benchmark_is_healthy(regime: MarketRegime) -> bool:
+        return regime.spy_trend == "bull" or regime.qqq_trend == "bull"
 
     def grade_for_score(self, score: float) -> str:
         if score >= self.settings.min_score_a_plus_plus:
@@ -295,8 +325,11 @@ class StrategyEngine:
             reasons.append(f"volume building {volume_ratio:.2f}")
 
         distance_atr = abs(close - ema_21) / max(atr, close * 0.005)
+        distance_ema50_atr = abs(close - ema_50) / max(atr, close * 0.005)
         if distance_atr > 3.0:
             rejections.append(f"entry extended from EMA21: {distance_atr:.2f} ATR")
+        elif distance_ema50_atr > 6.0:
+            rejections.append(f"entry extended from EMA50: {distance_ema50_atr:.2f} ATR")
         elif distance_atr <= 1.2:
             bonus += 5
             reasons.append("entry not extended")
@@ -339,7 +372,16 @@ class StrategyEngine:
         return self._long_setup(ticker, "institutional momentum continuation", close, atr, score, f"stacked EMA/MACD momentum, RSI {rsi:.1f}")
 
     @staticmethod
-    def _long_setup(ticker: str, setup_type: str, close: float, atr: float, score: float, reason: str, signal_tier: str = "A Signal") -> StrategySetup:
+    def _long_setup(
+        ticker: str,
+        setup_type: str,
+        close: float,
+        atr: float,
+        score: float,
+        reason: str,
+        signal_tier: str = "A Signal",
+        confirmations: tuple[str, ...] = (),
+    ) -> StrategySetup:
         risk = max(atr, close * 0.01)
         return StrategySetup(
             ticker=ticker,
@@ -353,4 +395,5 @@ class StrategyEngine:
             reason=reason,
             do_not_enter_conditions=[],
             signal_tier=signal_tier,
+            confirmations=confirmations,
         )

@@ -48,7 +48,7 @@ class PredatorTradingAI:
         self.risk_engine = RiskEngine(self.settings)
         self.signal_engine = SignalEngine(self.db)
         self.alert_policy = AlertPolicy(self.settings, self.db)
-        self.active_signal_tracker = ActiveSignalTracker(self.db)
+        self.active_signal_tracker = ActiveSignalTracker(self.db, self.settings)
         self.shadow_logger = ShadowModeLogger(self.db)
         self.telegram_bot = TelegramAlertBot(self.settings, self.db)
         self.retry = RetryPolicy(
@@ -239,7 +239,14 @@ class PredatorTradingAI:
             )
             return
 
-        alert_decision = self.alert_policy.evaluate(ticker, setup.signal_tier, setup.score, regime)
+        alert_decision = self.alert_policy.evaluate(
+            ticker,
+            setup.signal_tier,
+            setup.score,
+            regime,
+            confirmations=setup.confirmations,
+            sector=SECTOR_BY_TICKER.get(ticker),
+        )
         if not alert_decision.allowed:
             self.record_signal_suppressed(alert_decision.reason)
             self.logger.info(
@@ -323,7 +330,14 @@ class PredatorTradingAI:
             self.record_signal_suppressed("C alerts disabled")
             self.logger.info("Skipping Telegram alert for %s: C-grade alerts are disabled.", ticker)
             return
-        alert_decision = self.alert_policy.evaluate(ticker, setup.signal_tier, setup.score, regime)
+        alert_decision = self.alert_policy.evaluate(
+            ticker,
+            setup.signal_tier,
+            setup.score,
+            regime,
+            confirmations=setup.confirmations,
+            sector=SECTOR_BY_TICKER.get(ticker),
+        )
         if not alert_decision.allowed:
             self.record_signal_suppressed(alert_decision.reason)
             self.logger.info(
@@ -341,7 +355,8 @@ class PredatorTradingAI:
         message = SignalEngine.format_watch_alert(setup, bear_regime=self.is_bear_watch_regime(regime))
         self.log_sent_alert(ticker, setup.signal_tier, "observe_only", setup.score, setup.setup_type, regime.regime, message)
         self.alert_policy.record(ticker, setup.signal_tier)
-        self.active_signal_tracker.register_watch_signal(setup)
+        if self.settings.enable_b_tp_sl_tracking and setup.signal_tier == "B Watch Alert":
+            self.active_signal_tracker.register_watch_signal(setup)
         self.state.last_telegram_alert = alert_key
         self.state_store.set_cooldown(self.state, alert_key)
         asyncio.run(self.telegram_bot.send_message(message))

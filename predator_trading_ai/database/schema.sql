@@ -223,6 +223,7 @@ CREATE TABLE IF NOT EXISTS active_signals (
     entry_zone_low REAL NOT NULL,
     entry_zone_high REAL NOT NULL,
     stop_loss REAL NOT NULL,
+    original_stop_loss REAL,
     tp1 REAL NOT NULL,
     tp2 REAL NOT NULL,
     tp3 REAL NOT NULL,
@@ -231,6 +232,8 @@ CREATE TABLE IF NOT EXISTS active_signals (
     tp1_hit INTEGER NOT NULL DEFAULT 0,
     tp2_hit INTEGER NOT NULL DEFAULT 0,
     tp3_hit INTEGER NOT NULL DEFAULT 0,
+    breakeven_active INTEGER NOT NULL DEFAULT 0,
+    breakeven_price REAL,
     last_price REAL,
     close_reason TEXT
 );

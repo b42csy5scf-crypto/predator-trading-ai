@@ -3,11 +3,11 @@ from predator_trading_ai.database.db import Database
 from predator_trading_ai.engines.active_signal_tracker import ActiveSignalTracker
 
 
-def make_tracker(tmp_path) -> tuple[ActiveSignalTracker, Database]:
-    settings = Settings(database_url=f"sqlite:///{tmp_path / 'tracker.db'}")
+def make_tracker(tmp_path, **overrides) -> tuple[ActiveSignalTracker, Database]:
+    settings = Settings(database_url=f"sqlite:///{tmp_path / 'tracker.db'}", **overrides)
     db = Database(settings)
     db.initialize()
-    return ActiveSignalTracker(db), db
+    return ActiveSignalTracker(db, settings), db
 
 
 def register_signal(tracker: ActiveSignalTracker) -> int:
@@ -78,6 +78,40 @@ def test_active_signal_tp1_tp2_progress_updates_completed_trades(tmp_path) -> No
     second = db.fetch_all("SELECT * FROM completed_trades WHERE active_signal_id = ?", [signal_id])[0]
     assert second["outcome"] == "TP2"
     assert second["status"] == "active"
+
+
+def test_tp1_moves_stop_to_breakeven_for_trade_candidates(tmp_path) -> None:
+    tracker, db = make_tracker(tmp_path, move_stop_to_breakeven_after_tp1=True)
+    signal_id = register_signal(tracker)
+
+    updates = tracker.check_ticker("NVDA", 128.55)
+
+    assert [update.update_type for update in updates] == ["tp1"]
+    row = db.fetch_all("SELECT * FROM active_signals WHERE id = ?", [signal_id])[0]
+    expected_entry = (124.50 + 125.20) / 2
+    assert row["tp1_hit"] == 1
+    assert row["breakeven_active"] == 1
+    assert row["stop_loss"] == expected_entry
+    assert row["breakeven_price"] == expected_entry
+    assert row["original_stop_loss"] == 121.80
+
+
+def test_breakeven_exit_after_tp1_is_not_full_stop_loss(tmp_path) -> None:
+    tracker, db = make_tracker(tmp_path, move_stop_to_breakeven_after_tp1=True)
+    signal_id = register_signal(tracker)
+    tracker.check_ticker("NVDA", 128.55)
+
+    updates = tracker.check_ticker("NVDA", 124.85)
+
+    assert [update.update_type for update in updates] == ["breakeven"]
+    assert "Breakeven exit after TP1" in updates[0].message
+    row = db.fetch_all("SELECT * FROM active_signals WHERE id = ?", [signal_id])[0]
+    assert row["status"] == "closed"
+    assert row["close_reason"] == "breakeven_after_tp1"
+    completed = db.fetch_all("SELECT * FROM completed_trades WHERE active_signal_id = ?", [signal_id])[0]
+    assert completed["outcome"] == "BE"
+    assert completed["status"] == "closed"
+    assert completed["r_multiple"] == 0.0
 
 
 def test_new_grade_supersedes_previous_active_signal(tmp_path) -> None:

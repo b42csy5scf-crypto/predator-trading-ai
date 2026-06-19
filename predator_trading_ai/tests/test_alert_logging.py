@@ -17,6 +17,7 @@ def test_sent_alerts_table_logs_messages(tmp_path) -> None:
     )
     app = PredatorTradingAI(settings)
     app.db.initialize()
+    app.state.cooldowns.clear()
     app.log_sent_alert(
         ticker="AAPL",
         grade="B Watch Alert",
@@ -64,6 +65,7 @@ def test_c_grade_watch_alert_is_not_sent_or_logged(tmp_path) -> None:
     )
     app = PredatorTradingAI(settings)
     app.db.initialize()
+    app.state.cooldowns.clear()
     setup = StrategySetup(
         ticker="AAPL",
         direction="long",
@@ -83,6 +85,45 @@ def test_c_grade_watch_alert_is_not_sent_or_logged(tmp_path) -> None:
 
     rows = app.db.fetch_all("SELECT * FROM sent_alerts")
     assert rows == []
+
+
+def test_b_watch_alert_is_not_tracked_as_active_trade_by_default(tmp_path) -> None:
+    settings = Settings(
+        database_url=f"sqlite:///{tmp_path / 'predator_test.db'}",
+        telegram_bot_token=None,
+        enable_b_tp_sl_tracking=False,
+        min_score_b=58,
+    )
+    app = PredatorTradingAI(settings)
+    app.db.initialize()
+    app.state.cooldowns.clear()
+    setup = StrategySetup(
+        ticker="AAPL",
+        direction="long",
+        setup_type="graded watch setup",
+        score=60,
+        entry_zone_low=100,
+        entry_zone_high=101,
+        stop_loss=98,
+        targets=(103, 105, 108),
+        reason="strong watch setup",
+        do_not_enter_conditions=[],
+        signal_tier="B Watch Alert",
+        confirmations=(
+            "price above EMA50",
+            "EMA50 above EMA200",
+            "RSI between 45 and 65",
+            "relative volume >= 0.80",
+        ),
+    )
+    regime = MarketRegime("normal", 1.0, "normal", 0.3, True, "Normal tradable regime", spy_trend="bull", qqq_trend="bull")
+
+    app.send_watch_alert("AAPL", setup, regime)
+
+    sent = app.db.fetch_all("SELECT * FROM sent_alerts")
+    active = app.db.fetch_all("SELECT * FROM active_signals")
+    assert len(sent) == 1
+    assert active == []
 
 
 def test_scan_alert_summary_counts_generated_and_suppressed(tmp_path) -> None:

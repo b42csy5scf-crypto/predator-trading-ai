@@ -101,7 +101,7 @@ try:
         min_score_a_plus_plus: float = Field(default=75.0, ge=0, le=100)
         min_score_a_plus: float = Field(default=65.0, ge=0, le=100)
         min_score_a: float = Field(default=58.0, ge=0, le=100)
-        min_score_b: float = Field(default=50.0, ge=0, le=100)
+        min_score_b: float = Field(default=58.0, ge=0, le=100)
         min_score_c: float = Field(default=40.0, ge=0, le=100)
         min_score_watch: float = Field(default=50.0, ge=0, le=100)
         enable_b_alerts: bool = True
@@ -109,6 +109,11 @@ try:
         enable_watchlist_alerts: bool = True
         max_alerts_per_day: int = Field(default=20, ge=1)
         max_alerts_per_ticker_per_day: int = Field(default=1, ge=1)
+        b_min_confirmations: int = Field(default=4, ge=1)
+        b_min_rel_volume: float = Field(default=0.80, ge=0)
+        max_b_alerts_per_sector_per_day: int = Field(default=2, ge=0)
+        enable_b_tp_sl_tracking: bool = False
+        move_stop_to_breakeven_after_tp1: bool = True
         alert_cooldown_minutes: int = Field(default=60, ge=0)
         graded_alert_cooldown_seconds: int = Field(default=3600, ge=0)
 
@@ -184,7 +189,7 @@ except ModuleNotFoundError:
         min_score_a_plus_plus: float = 75.0
         min_score_a_plus: float = 65.0
         min_score_a: float = 58.0
-        min_score_b: float = 50.0
+        min_score_b: float = 58.0
         min_score_c: float = 40.0
         min_score_watch: float = 50.0
         enable_b_alerts: bool = True
@@ -192,6 +197,11 @@ except ModuleNotFoundError:
         enable_watchlist_alerts: bool = True
         max_alerts_per_day: int = 20
         max_alerts_per_ticker_per_day: int = 1
+        b_min_confirmations: int = 4
+        b_min_rel_volume: float = 0.80
+        max_b_alerts_per_sector_per_day: int = 2
+        enable_b_tp_sl_tracking: bool = False
+        move_stop_to_breakeven_after_tp1: bool = True
         alert_cooldown_minutes: int = 60
         graded_alert_cooldown_seconds: int = 3600
 
