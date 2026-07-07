@@ -34,6 +34,8 @@ def reset_polling_globals() -> None:
     telegram_module.TELEGRAM_POLLING_ALREADY_STARTED = False
     telegram_module.TELEGRAM_POLLING_STARTED = False
     telegram_module.TELEGRAM_POLLING_SKIPPED_REASON = "not_started"
+    telegram_module.TELEGRAM_POLLING_OWNER = None
+    telegram_module.TELEGRAM_POLLING_DISABLED_REASON = None
 
 
 def test_duplicate_telegram_polling_startup_is_prevented(monkeypatch) -> None:
@@ -56,13 +58,14 @@ def test_duplicate_telegram_polling_startup_is_prevented(monkeypatch) -> None:
 
     first = TelegramAlertBot(settings)
     second = TelegramAlertBot(settings)
-    first.start_command_polling()
-    second.start_command_polling()
+    first.start_command_polling(source_module="test.first")
+    second.start_command_polling(source_module="test.second")
 
     assert starts == ["started"]
     assert telegram_module.TELEGRAM_POLLING_ALREADY_STARTED is True
     assert telegram_module.TELEGRAM_POLLING_STARTED is True
     assert telegram_module.TELEGRAM_POLLING_SKIPPED_REASON == "duplicate_startup"
+    assert telegram_module.TELEGRAM_POLLING_OWNER == "test.first"
     reset_polling_globals()
 
 
@@ -80,7 +83,7 @@ def test_telegram_polling_disabled_does_not_start_thread(monkeypatch) -> None:
     monkeypatch.setattr(telegram_module.threading, "Thread", DummyThread)
     bot = TelegramAlertBot(Settings(telegram_bot_token="token", enable_telegram_polling=False))
 
-    bot.start_command_polling()
+    bot.start_command_polling(source_module="test.disabled")
 
     assert starts == []
     assert telegram_module.TELEGRAM_POLLING_ALREADY_STARTED is False
@@ -94,3 +97,18 @@ def test_telegram_conflict_is_detected() -> None:
 
     assert TelegramAlertBot.is_conflict_error(Exception("terminated by other getUpdates request"))
     assert not TelegramAlertBot.is_conflict_error(ConflictLike("network timeout"))
+
+
+def test_telegram_conflict_disables_command_polling_only() -> None:
+    reset_polling_globals()
+    bot = TelegramAlertBot(Settings(telegram_bot_token="token"))
+    telegram_module.TELEGRAM_POLLING_ALREADY_STARTED = True
+    telegram_module.TELEGRAM_POLLING_STARTED = True
+
+    bot.mark_polling_conflict("test.conflict", Exception("terminated by other getUpdates request"))
+
+    assert telegram_module.TELEGRAM_POLLING_ALREADY_STARTED is True
+    assert telegram_module.TELEGRAM_POLLING_STARTED is False
+    assert telegram_module.TELEGRAM_POLLING_SKIPPED_REASON == "conflict_detected"
+    assert "getUpdates" in telegram_module.TELEGRAM_POLLING_DISABLED_REASON
+    reset_polling_globals()

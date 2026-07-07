@@ -11,6 +11,8 @@ TELEGRAM_POLLING_LOCK = threading.Lock()
 TELEGRAM_POLLING_ALREADY_STARTED = False
 TELEGRAM_POLLING_STARTED = False
 TELEGRAM_POLLING_SKIPPED_REASON = "not_started"
+TELEGRAM_POLLING_OWNER = None
+TELEGRAM_POLLING_DISABLED_REASON = None
 
 
 class TelegramAlertBot:
@@ -43,35 +45,42 @@ class TelegramAlertBot:
         except Exception as exc:
             self.logger.exception("Telegram send failed: %s", exc)
 
-    def start_command_polling(self) -> None:
+    def start_command_polling(self, source_module: str = "unknown") -> None:
         global TELEGRAM_POLLING_ALREADY_STARTED, TELEGRAM_POLLING_STARTED, TELEGRAM_POLLING_SKIPPED_REASON
+        global TELEGRAM_POLLING_OWNER
+        self.logger.info("Telegram polling startup attempted by module=%s", source_module)
         if not self.settings.enable_telegram_polling:
             TELEGRAM_POLLING_SKIPPED_REASON = "disabled_by_config"
-            self.log_polling_startup(started=False, skipped_reason=TELEGRAM_POLLING_SKIPPED_REASON)
+            self.log_polling_startup(started=False, skipped_reason=TELEGRAM_POLLING_SKIPPED_REASON, source_module=source_module)
             return
         if self._command_thread and self._command_thread.is_alive():
             TELEGRAM_POLLING_SKIPPED_REASON = "instance_thread_alive"
-            self.log_polling_startup(started=True, skipped_reason=TELEGRAM_POLLING_SKIPPED_REASON)
+            self.log_polling_startup(started=True, skipped_reason=TELEGRAM_POLLING_SKIPPED_REASON, source_module=source_module)
             return
         if not self.settings.telegram_bot_token:
             TELEGRAM_POLLING_SKIPPED_REASON = "missing_bot_token"
-            self.log_polling_startup(started=False, skipped_reason=TELEGRAM_POLLING_SKIPPED_REASON)
+            self.log_polling_startup(started=False, skipped_reason=TELEGRAM_POLLING_SKIPPED_REASON, source_module=source_module)
             self.logger.info("Telegram bot token missing; command polling disabled.")
             return
         with TELEGRAM_POLLING_LOCK:
             if TELEGRAM_POLLING_ALREADY_STARTED:
                 TELEGRAM_POLLING_SKIPPED_REASON = "duplicate_startup"
-                self.log_polling_startup(started=TELEGRAM_POLLING_STARTED, skipped_reason=TELEGRAM_POLLING_SKIPPED_REASON)
-                self.logger.info("Telegram polling already running; skipping duplicate startup.")
+                self.log_polling_startup(started=TELEGRAM_POLLING_STARTED, skipped_reason=TELEGRAM_POLLING_SKIPPED_REASON, source_module=source_module)
+                self.logger.info(
+                    "Telegram polling already running; skipping duplicate startup. owner=%s attempted_by=%s",
+                    TELEGRAM_POLLING_OWNER,
+                    source_module,
+                )
                 return
             TELEGRAM_POLLING_ALREADY_STARTED = True
             TELEGRAM_POLLING_STARTED = True
             TELEGRAM_POLLING_SKIPPED_REASON = "none"
-            self._command_thread = threading.Thread(target=self._run_command_polling, daemon=True)
+            TELEGRAM_POLLING_OWNER = source_module
+            self._command_thread = threading.Thread(target=lambda: self._run_command_polling(source_module), daemon=True)
             self._command_thread.start()
-            self.log_polling_startup(started=True, skipped_reason="none")
+            self.log_polling_startup(started=True, skipped_reason="none", source_module=source_module)
 
-    def _run_command_polling(self) -> None:
+    def _run_command_polling(self, source_module: str = "unknown") -> None:
         try:
             from telegram.ext import Application, CommandHandler
 
@@ -89,21 +98,31 @@ class TelegramAlertBot:
 
             application = Application.builder().token(self.settings.telegram_bot_token).build()
             application.add_handler(CommandHandler("report", report))
-            self.logger.info("Telegram admin command polling started.")
+            self.logger.info("Telegram admin command polling started by module=%s.", source_module)
             application.run_polling(close_loop=False, stop_signals=None)
         except Exception as exc:
             if self.is_conflict_error(exc):
+                self.mark_polling_conflict(source_module, exc)
                 self.logger.warning(
                     "Telegram polling conflict detected, alerts sending will continue, scanning will continue."
                 )
                 return
             self.logger.exception("Telegram command polling stopped: %s", exc)
 
-    def log_polling_startup(self, started: bool, skipped_reason: str) -> None:
+    def mark_polling_conflict(self, source_module: str, exc: Exception) -> None:
+        global TELEGRAM_POLLING_STARTED, TELEGRAM_POLLING_SKIPPED_REASON, TELEGRAM_POLLING_DISABLED_REASON
+        with TELEGRAM_POLLING_LOCK:
+            TELEGRAM_POLLING_STARTED = False
+            TELEGRAM_POLLING_SKIPPED_REASON = "conflict_detected"
+            TELEGRAM_POLLING_DISABLED_REASON = str(exc)
+        self.logger.warning("Telegram polling disabled for commands after Conflict. module=%s", source_module)
+
+    def log_polling_startup(self, started: bool, skipped_reason: str, source_module: str) -> None:
         self.logger.info("SERVICE_ROLE=%s", self.settings.service_role)
         self.logger.info("ENABLE_TELEGRAM_POLLING=%s", self.settings.enable_telegram_polling)
         self.logger.info("TELEGRAM_POLLING_STARTED=%s", started)
         self.logger.info("TELEGRAM_POLLING_SKIPPED_REASON=%s", skipped_reason)
+        self.logger.info("TELEGRAM_POLLING_ATTEMPT_MODULE=%s", source_module)
 
     @staticmethod
     def is_conflict_error(exc: Exception) -> bool:

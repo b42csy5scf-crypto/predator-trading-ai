@@ -1,6 +1,7 @@
 from predator_trading_ai.config import Settings
 from predator_trading_ai.database.db import Database
 from predator_trading_ai.engines.active_signal_tracker import ActiveSignalTracker
+from predator_trading_ai.alerts.telegram_bot import TelegramAlertBot
 
 
 def make_tracker(tmp_path, **overrides) -> tuple[ActiveSignalTracker, Database]:
@@ -132,3 +133,16 @@ def test_new_grade_supersedes_previous_active_signal(tmp_path) -> None:
     assert first["status"] == "closed"
     assert first["close_reason"] == "superseded"
     assert second["status"] == "active"
+
+
+def test_active_signal_tracker_does_not_start_telegram_polling(tmp_path, monkeypatch) -> None:
+    def fail_polling(*args, **kwargs):
+        raise AssertionError("TP/SL tracker must not start Telegram polling")
+
+    monkeypatch.setattr(TelegramAlertBot, "start_command_polling", fail_polling)
+    tracker, _ = make_tracker(tmp_path)
+    register_signal(tracker)
+
+    updates = tracker.check_ticker("NVDA", 128.55)
+
+    assert [update.update_type for update in updates] == ["tp1"]

@@ -85,7 +85,7 @@ class PredatorTradingAI:
         )
         self.logger.info("Watchlist: %s", ", ".join(self.watchlist))
         self.logger.info("Loop interval: %s seconds", self.settings.loop_interval_seconds)
-        self.telegram_bot.start_command_polling()
+        self.telegram_bot.start_command_polling(source_module="predator_trading_ai.main")
         if self.state.safe_mode:
             self.logger.warning("Recovered in SAFE MODE: %s", self.state.safe_mode_reason)
         self.record_health("system", "ok", "system started")

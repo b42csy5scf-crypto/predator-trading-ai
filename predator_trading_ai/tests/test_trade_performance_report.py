@@ -1,7 +1,9 @@
 import subprocess
 
+from predator_trading_ai.alerts.telegram_bot import TelegramAlertBot
 from predator_trading_ai.config import Settings
 from predator_trading_ai.database.db import Database
+from predator_trading_ai.reports.report_runner import PerformanceReportRunner
 from predator_trading_ai.reports.trade_performance_report import TradePerformanceReport
 
 
@@ -140,7 +142,31 @@ def test_report_reads_completed_trades_table_directly(tmp_path) -> None:
     report = TradePerformanceReport(db).build()
     assert "Total completed trades: 1" in report
     assert "A++ Signal" in report
-    assert "75+" in report
+
+
+def test_report_runner_sends_without_starting_polling(tmp_path, monkeypatch) -> None:
+    settings = Settings(
+        database_url=f"sqlite:///{tmp_path / 'report_runner.db'}",
+        telegram_bot_token="token",
+        telegram_chat_id="123",
+    )
+    sent_messages: list[str] = []
+
+    def fail_polling(*args, **kwargs):
+        raise AssertionError("report runner must not start Telegram polling")
+
+    async def fake_send_message(self, text: str) -> None:
+        sent_messages.append(text)
+
+    monkeypatch.setattr(TelegramAlertBot, "start_command_polling", fail_polling)
+    monkeypatch.setattr(TelegramAlertBot, "send_message", fake_send_message)
+    runner = PerformanceReportRunner(settings)
+
+    result = runner.build_and_send_sync()
+
+    assert result.sent is True
+    assert sent_messages
+    assert sent_messages[0] == result.report
 
 
 def test_report_backfills_from_terminal_signal_updates(tmp_path) -> None:
