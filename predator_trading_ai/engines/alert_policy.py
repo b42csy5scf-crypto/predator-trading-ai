@@ -11,6 +11,7 @@ from predator_trading_ai.utils.watchlist import SECTOR_BY_TICKER
 
 EASTERN = ZoneInfo("America/New_York")
 TOTAL_KEY = "__TOTAL__"
+MIN_B_ALERT_SCORE_FLOOR = 58.0
 GRADE_RANK = {
     "C Risky/Early Alert": 0,
     "B Watch Alert": 1,
@@ -40,6 +41,7 @@ class AlertPolicy:
         now: Optional[datetime] = None,
         confirmations: Iterable[str] = (),
         sector: Optional[str] = None,
+        setup_reason: str = "",
     ) -> AlertDecision:
         rank = GRADE_RANK.get(grade, -1)
         if rank < GRADE_RANK["B Watch Alert"]:
@@ -48,7 +50,7 @@ class AlertPolicy:
             return AlertDecision(False, f"{regime.regime_severity} {regime.regime} regime is blocked")
 
         if grade == "B Watch Alert":
-            b_decision = self._evaluate_b_watch(ticker, score, regime, now, confirmations, sector)
+            b_decision = self._evaluate_b_watch(ticker, score, regime, now, confirmations, sector, setup_reason)
             if not b_decision.allowed:
                 return b_decision
 
@@ -82,11 +84,13 @@ class AlertPolicy:
         now: Optional[datetime],
         confirmations: Iterable[str],
         sector: Optional[str],
+        setup_reason: str,
     ) -> AlertDecision:
         confirmations_set = set(confirmations)
-        if score < self.settings.min_score_b:
-            return AlertDecision(False, f"B score below strong-watch threshold: {score:.0f}")
-        if confirmations_set == {"price above EMA50"}:
+        min_score_b = self.effective_min_score_b()
+        if score < min_score_b:
+            return AlertDecision(False, f"B score below strong-watch threshold: {score:.0f} < {min_score_b:.0f}")
+        if confirmations_set == {"price above EMA50"} or self._reason_only_price_above_ema50(setup_reason):
             return AlertDecision(False, "B suppressed: price above EMA50 is the only confirmation")
         if len(confirmations_set) < self.settings.b_min_confirmations:
             return AlertDecision(
@@ -100,6 +104,19 @@ class AlertPolicy:
         if self._sector_b_limit_reached(ticker, sector, now):
             return AlertDecision(False, "maximum B alerts reached for sector today")
         return AlertDecision(True, "strong B watch policy passed")
+
+    def effective_min_score_b(self) -> float:
+        return max(float(self.settings.min_score_b), MIN_B_ALERT_SCORE_FLOOR)
+
+    @staticmethod
+    def _reason_only_price_above_ema50(reason: str) -> bool:
+        parts = [
+            part.strip().lower()
+            for chunk in (reason or "").split(";")
+            for part in chunk.split(",")
+            if part.strip()
+        ]
+        return len(parts) == 1 and parts[0] == "price above ema50"
 
     def record(self, ticker: str, grade: str, now: Optional[datetime] = None) -> None:
         alert_date = self.alert_date(now)

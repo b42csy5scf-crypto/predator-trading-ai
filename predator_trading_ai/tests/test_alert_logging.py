@@ -87,7 +87,7 @@ def test_c_grade_watch_alert_is_not_sent_or_logged(tmp_path) -> None:
     assert rows == []
 
 
-def test_b_watch_alert_is_not_tracked_as_active_trade_by_default(tmp_path) -> None:
+def test_b_watch_alert_is_not_tracked_as_active_trade_by_default(tmp_path, monkeypatch) -> None:
     settings = Settings(
         database_url=f"sqlite:///{tmp_path / 'predator_test.db'}",
         telegram_bot_token=None,
@@ -97,6 +97,14 @@ def test_b_watch_alert_is_not_tracked_as_active_trade_by_default(tmp_path) -> No
     app = PredatorTradingAI(settings)
     app.db.initialize()
     app.state.cooldowns.clear()
+    log_messages: list[str] = []
+    original_info = app.logger.info
+
+    def capture_info(message, *args, **kwargs):
+        log_messages.append(message % args if args else message)
+        original_info(message, *args, **kwargs)
+
+    monkeypatch.setattr(app.logger, "info", capture_info)
     setup = StrategySetup(
         ticker="AAPL",
         direction="long",
@@ -124,6 +132,57 @@ def test_b_watch_alert_is_not_tracked_as_active_trade_by_default(tmp_path) -> No
     active = app.db.fetch_all("SELECT * FROM active_signals")
     assert len(sent) == 1
     assert active == []
+    output = "\n".join(log_messages)
+    assert "B_ALERT_POLICY_DECISION ticker=AAPL" in output
+    assert "allowed=True" in output
+
+
+def test_b_watch_alert_below_effective_floor_is_logged_and_not_sent(tmp_path, monkeypatch) -> None:
+    settings = Settings(
+        database_url=f"sqlite:///{tmp_path / 'predator_test.db'}",
+        telegram_bot_token=None,
+        min_score_b=50,
+    )
+    app = PredatorTradingAI(settings)
+    app.db.initialize()
+    app.state.cooldowns.clear()
+    log_messages: list[str] = []
+    original_info = app.logger.info
+
+    def capture_info(message, *args, **kwargs):
+        log_messages.append(message % args if args else message)
+        original_info(message, *args, **kwargs)
+
+    monkeypatch.setattr(app.logger, "info", capture_info)
+    setup = StrategySetup(
+        ticker="AAPL",
+        direction="long",
+        setup_type="graded watch setup",
+        score=55,
+        entry_zone_low=100,
+        entry_zone_high=101,
+        stop_loss=98,
+        targets=(103, 105, 108),
+        reason="strong watch setup",
+        do_not_enter_conditions=[],
+        signal_tier="B Watch Alert",
+        confirmations=(
+            "price above EMA50",
+            "EMA50 above EMA200",
+            "RSI between 45 and 65",
+            "relative volume >= 0.80",
+        ),
+    )
+    regime = MarketRegime("normal", 1.0, "normal", 0.3, True, "Normal tradable regime", spy_trend="bull", qqq_trend="bull")
+
+    app.send_watch_alert("AAPL", setup, regime)
+
+    assert app.db.fetch_all("SELECT * FROM sent_alerts") == []
+    output = "\n".join(log_messages)
+    assert "B_ALERT_POLICY_DECISION ticker=AAPL" in output
+    assert "min_score_b_configured=50" in output
+    assert "min_score_b_effective=58" in output
+    assert "allowed=False" in output
 
 
 def test_scan_alert_summary_counts_generated_and_suppressed(tmp_path) -> None:

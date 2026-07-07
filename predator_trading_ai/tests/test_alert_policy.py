@@ -76,6 +76,13 @@ def test_weak_b_score_is_rejected(tmp_path) -> None:
     assert "strong-watch threshold" in decision.reason
 
 
+def test_b_score_floor_blocks_stale_env_override(tmp_path) -> None:
+    policy = make_policy(tmp_path, min_score_b=50)
+    decision = policy.evaluate("AAPL", "B Watch Alert", 55, normal_regime(), confirmations=strong_b_confirmations())
+    assert not decision.allowed
+    assert "55 < 58" in decision.reason
+
+
 def test_moderate_bear_allows_strong_b(tmp_path) -> None:
     policy = make_policy(tmp_path)
     moderate_bear = MarketRegime(
@@ -124,6 +131,20 @@ def test_b_suppressed_if_only_price_above_ema50(tmp_path) -> None:
         58,
         normal_regime(),
         confirmations=("price above EMA50",),
+    )
+    assert not decision.allowed
+    assert "only confirmation" in decision.reason
+
+
+def test_b_suppressed_if_reason_only_price_above_ema50(tmp_path) -> None:
+    policy = make_policy(tmp_path)
+    decision = policy.evaluate(
+        "AAPL",
+        "B Watch Alert",
+        60,
+        normal_regime(),
+        confirmations=strong_b_confirmations(),
+        setup_reason="price above EMA50",
     )
     assert not decision.allowed
     assert "only confirmation" in decision.reason

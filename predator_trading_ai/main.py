@@ -1,5 +1,7 @@
 import argparse
 import asyncio
+import os
+import subprocess
 import time
 from collections import Counter
 from datetime import datetime, time as dt_time, timedelta, timezone
@@ -70,6 +72,17 @@ class PredatorTradingAI:
     def run(self, run_once: bool = False) -> None:
         self.db.initialize()
         self.logger.info("Predator Trading AI started. Live trading enabled: %s", self.settings.live_trading)
+        self.logger.info("Runtime revision: %s", self.runtime_revision())
+        self.logger.info(
+            "Alert config: MIN_SCORE_B configured=%.0f effective=%.0f B_MIN_CONFIRMATIONS=%d "
+            "B_MIN_REL_VOLUME=%.2f ENABLE_B_ALERTS=%s ENABLE_B_TP_SL_TRACKING=%s",
+            self.settings.min_score_b,
+            self.alert_policy.effective_min_score_b(),
+            self.settings.b_min_confirmations,
+            self.settings.b_min_rel_volume,
+            self.settings.enable_b_alerts,
+            self.settings.enable_b_tp_sl_tracking,
+        )
         self.logger.info("Watchlist: %s", ", ".join(self.watchlist))
         self.logger.info("Loop interval: %s seconds", self.settings.loop_interval_seconds)
         self.telegram_bot.start_command_polling()
@@ -246,6 +259,7 @@ class PredatorTradingAI:
             regime,
             confirmations=setup.confirmations,
             sector=SECTOR_BY_TICKER.get(ticker),
+            setup_reason=setup.reason,
         )
         if not alert_decision.allowed:
             self.record_signal_suppressed(alert_decision.reason)
@@ -337,7 +351,10 @@ class PredatorTradingAI:
             regime,
             confirmations=setup.confirmations,
             sector=SECTOR_BY_TICKER.get(ticker),
+            setup_reason=setup.reason,
         )
+        if setup.signal_tier == "B Watch Alert":
+            self.log_b_alert_policy_decision(ticker, setup, regime, alert_decision)
         if not alert_decision.allowed:
             self.record_signal_suppressed(alert_decision.reason)
             self.logger.info(
@@ -361,6 +378,28 @@ class PredatorTradingAI:
         self.state_store.set_cooldown(self.state, alert_key)
         asyncio.run(self.telegram_bot.send_message(message))
         self.record_signal_generated()
+
+    def log_b_alert_policy_decision(self, ticker: str, setup: StrategySetup, regime: MarketRegime, decision) -> None:
+        confirmations = tuple(setup.confirmations)
+        self.logger.info(
+            "B_ALERT_POLICY_DECISION ticker=%s score=%.0f min_score_b_configured=%.0f "
+            "min_score_b_effective=%.0f confirmations=%d confirmations_detail=%s "
+            "spy_qqq_healthy=%s spy_trend=%s qqq_trend=%s regime=%s severity=%s "
+            "allowed=%s reason=%s",
+            ticker,
+            setup.score,
+            self.settings.min_score_b,
+            self.alert_policy.effective_min_score_b(),
+            len(confirmations),
+            "|".join(confirmations) if confirmations else "none",
+            self.alert_policy.market_healthy_for_b(regime),
+            regime.spy_trend,
+            regime.qqq_trend,
+            regime.regime,
+            regime.regime_severity,
+            decision.allowed,
+            decision.reason,
+        )
 
     def process_active_signal_updates(self, ticker: str, current_price: float) -> None:
         updates = self.active_signal_tracker.check_ticker(ticker, current_price)
@@ -563,6 +602,24 @@ class PredatorTradingAI:
             asyncio.run(self.telegram_bot.send_message(message))
         except Exception as exc:
             self.logger.exception("System alert failed: %s", exc)
+
+    @staticmethod
+    def runtime_revision() -> str:
+        for key in ("RAILWAY_GIT_COMMIT_SHA", "RAILWAY_GIT_COMMIT", "SOURCE_COMMIT", "GIT_COMMIT_SHA"):
+            value = os.getenv(key)
+            if value:
+                return f"{key}={value}"
+        try:
+            completed = subprocess.run(
+                ["git", "rev-parse", "--short=12", "HEAD"],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=2,
+            )
+            return f"git={completed.stdout.strip()}"
+        except Exception:
+            return "unknown"
 
     @staticmethod
     def clock_is_sane(now: datetime) -> bool:
