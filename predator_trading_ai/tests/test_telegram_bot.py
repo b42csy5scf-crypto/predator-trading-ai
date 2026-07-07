@@ -1,3 +1,6 @@
+import asyncio
+from types import SimpleNamespace
+
 import predator_trading_ai.alerts.telegram_bot as telegram_module
 from predator_trading_ai.alerts.telegram_bot import TelegramAlertBot
 from predator_trading_ai.config import Settings
@@ -32,6 +35,7 @@ def test_telegram_chunks_long_messages() -> None:
 
 def reset_polling_globals() -> None:
     telegram_module.TELEGRAM_POLLING_ALREADY_STARTED = False
+    telegram_module.TELEGRAM_POLLING_STARTING = False
     telegram_module.TELEGRAM_POLLING_STARTED = False
     telegram_module.TELEGRAM_POLLING_SKIPPED_REASON = "not_started"
     telegram_module.TELEGRAM_POLLING_OWNER = None
@@ -63,7 +67,8 @@ def test_duplicate_telegram_polling_startup_is_prevented(monkeypatch) -> None:
 
     assert starts == ["started"]
     assert telegram_module.TELEGRAM_POLLING_ALREADY_STARTED is True
-    assert telegram_module.TELEGRAM_POLLING_STARTED is True
+    assert telegram_module.TELEGRAM_POLLING_STARTING is True
+    assert telegram_module.TELEGRAM_POLLING_STARTED is False
     assert telegram_module.TELEGRAM_POLLING_SKIPPED_REASON == "duplicate_startup"
     assert telegram_module.TELEGRAM_POLLING_OWNER == "test.first"
     reset_polling_globals()
@@ -91,6 +96,32 @@ def test_telegram_polling_disabled_does_not_start_thread(monkeypatch) -> None:
     reset_polling_globals()
 
 
+def test_send_message_still_works_when_polling_disabled(monkeypatch) -> None:
+    sent: list[tuple[str, str]] = []
+
+    class FakeBot:
+        def __init__(self, token):
+            self.token = token
+
+        async def send_message(self, chat_id, text):
+            sent.append((chat_id, text))
+
+    import telegram
+
+    monkeypatch.setattr(telegram, "Bot", FakeBot)
+    bot = TelegramAlertBot(
+        Settings(
+            telegram_bot_token="token",
+            telegram_chat_id="123",
+            enable_telegram_polling=False,
+        )
+    )
+
+    asyncio.run(bot.send_message("hello"))
+
+    assert sent == [("123", "hello")]
+
+
 def test_telegram_conflict_is_detected() -> None:
     class ConflictLike(Exception):
         pass
@@ -103,11 +134,116 @@ def test_telegram_conflict_disables_command_polling_only() -> None:
     reset_polling_globals()
     bot = TelegramAlertBot(Settings(telegram_bot_token="token"))
     telegram_module.TELEGRAM_POLLING_ALREADY_STARTED = True
+    telegram_module.TELEGRAM_POLLING_STARTING = True
     telegram_module.TELEGRAM_POLLING_STARTED = True
 
     bot.mark_polling_conflict("test.conflict", Exception("terminated by other getUpdates request"))
 
     assert telegram_module.TELEGRAM_POLLING_ALREADY_STARTED is True
+    assert telegram_module.TELEGRAM_POLLING_STARTING is False
+    assert telegram_module.TELEGRAM_POLLING_STARTED is False
+    assert telegram_module.TELEGRAM_POLLING_SKIPPED_REASON == "conflict_detected"
+    assert "getUpdates" in telegram_module.TELEGRAM_POLLING_DISABLED_REASON
+    reset_polling_globals()
+
+
+def test_polling_stable_is_marked_only_after_startup() -> None:
+    reset_polling_globals()
+    bot = TelegramAlertBot(Settings(telegram_bot_token="token"))
+    telegram_module.TELEGRAM_POLLING_ALREADY_STARTED = True
+    telegram_module.TELEGRAM_POLLING_STARTING = True
+
+    bot.mark_polling_stable("test.stable")
+
+    assert telegram_module.TELEGRAM_POLLING_STARTING is False
+    assert telegram_module.TELEGRAM_POLLING_STARTED is True
+    assert telegram_module.TELEGRAM_POLLING_SKIPPED_REASON == "none"
+    reset_polling_globals()
+
+
+def test_command_polling_does_not_retry_after_conflict(monkeypatch) -> None:
+    reset_polling_globals()
+    starts: list[str] = []
+
+    class DummyThread:
+        def __init__(self, target, daemon):
+            pass
+
+        def start(self) -> None:
+            starts.append("started")
+
+    monkeypatch.setattr(telegram_module.threading, "Thread", DummyThread)
+    bot = TelegramAlertBot(Settings(telegram_bot_token="token"))
+    bot.mark_polling_conflict("test.conflict", Exception("terminated by other getUpdates request"))
+
+    bot.start_command_polling(source_module="test.retry")
+
+    assert starts == []
+    assert telegram_module.TELEGRAM_POLLING_SKIPPED_REASON == "conflict_detected"
+    reset_polling_globals()
+
+
+def test_polling_background_conflict_is_caught(monkeypatch) -> None:
+    reset_polling_globals()
+
+    class FakeUpdater:
+        running = True
+
+        async def start_polling(self, **kwargs):
+            kwargs["error_callback"](Exception("terminated by other getUpdates request"))
+
+        async def stop(self):
+            self.running = False
+
+    class FakeApplication:
+        def __init__(self):
+            self.updater = FakeUpdater()
+            self.running = True
+            self.error_handler = None
+
+        def add_handler(self, handler):
+            self.handler = handler
+
+        def add_error_handler(self, handler):
+            self.error_handler = handler
+
+        async def initialize(self):
+            pass
+
+        async def start(self):
+            pass
+
+        def create_task(self, coro):
+            return asyncio.create_task(coro)
+
+        async def process_error(self, error, update):
+            await self.error_handler(update, SimpleNamespace(error=error))
+
+        async def stop(self):
+            self.running = False
+
+        async def shutdown(self):
+            pass
+
+    class FakeBuilder:
+        def token(self, token):
+            return self
+
+        def build(self):
+            return FakeApplication()
+
+    class FakeApplicationFactory:
+        @staticmethod
+        def builder():
+            return FakeBuilder()
+
+    import telegram.ext
+
+    monkeypatch.setattr(telegram.ext, "Application", FakeApplicationFactory)
+    bot = TelegramAlertBot(Settings(telegram_bot_token="token"))
+
+    asyncio.run(bot._run_command_polling_async("test.background"))
+
     assert telegram_module.TELEGRAM_POLLING_STARTED is False
     assert telegram_module.TELEGRAM_POLLING_SKIPPED_REASON == "conflict_detected"
     assert "getUpdates" in telegram_module.TELEGRAM_POLLING_DISABLED_REASON

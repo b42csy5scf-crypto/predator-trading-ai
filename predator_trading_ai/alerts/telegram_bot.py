@@ -1,3 +1,4 @@
+import asyncio
 import threading
 from typing import Optional
 
@@ -9,6 +10,7 @@ from predator_trading_ai.utils.logger import setup_logger
 
 TELEGRAM_POLLING_LOCK = threading.Lock()
 TELEGRAM_POLLING_ALREADY_STARTED = False
+TELEGRAM_POLLING_STARTING = False
 TELEGRAM_POLLING_STARTED = False
 TELEGRAM_POLLING_SKIPPED_REASON = "not_started"
 TELEGRAM_POLLING_OWNER = None
@@ -46,9 +48,14 @@ class TelegramAlertBot:
             self.logger.exception("Telegram send failed: %s", exc)
 
     def start_command_polling(self, source_module: str = "unknown") -> None:
-        global TELEGRAM_POLLING_ALREADY_STARTED, TELEGRAM_POLLING_STARTED, TELEGRAM_POLLING_SKIPPED_REASON
+        global TELEGRAM_POLLING_ALREADY_STARTED, TELEGRAM_POLLING_STARTING, TELEGRAM_POLLING_STARTED
+        global TELEGRAM_POLLING_SKIPPED_REASON
         global TELEGRAM_POLLING_OWNER
         self.logger.info("Telegram polling startup attempted by module=%s", source_module)
+        if TELEGRAM_POLLING_SKIPPED_REASON == "conflict_detected":
+            self.log_polling_startup(started=False, skipped_reason="conflict_detected", source_module=source_module)
+            self.logger.info("Telegram command polling disabled after Conflict; skipping startup.")
+            return
         if not self.settings.enable_telegram_polling:
             TELEGRAM_POLLING_SKIPPED_REASON = "disabled_by_config"
             self.log_polling_startup(started=False, skipped_reason=TELEGRAM_POLLING_SKIPPED_REASON, source_module=source_module)
@@ -73,14 +80,19 @@ class TelegramAlertBot:
                 )
                 return
             TELEGRAM_POLLING_ALREADY_STARTED = True
-            TELEGRAM_POLLING_STARTED = True
+            TELEGRAM_POLLING_STARTING = True
+            TELEGRAM_POLLING_STARTED = False
             TELEGRAM_POLLING_SKIPPED_REASON = "none"
             TELEGRAM_POLLING_OWNER = source_module
             self._command_thread = threading.Thread(target=lambda: self._run_command_polling(source_module), daemon=True)
             self._command_thread.start()
-            self.log_polling_startup(started=True, skipped_reason="none", source_module=source_module)
+            self.log_polling_startup(started=False, skipped_reason="none", source_module=source_module)
 
     def _run_command_polling(self, source_module: str = "unknown") -> None:
+        asyncio.run(self._run_command_polling_async(source_module))
+
+    async def _run_command_polling_async(self, source_module: str = "unknown") -> None:
+        application = None
         try:
             from telegram.ext import Application, CommandHandler
 
@@ -96,10 +108,35 @@ class TelegramAlertBot:
                 if not result.sent:
                     await update.message.reply_text("Report generated, but Telegram recipients are not configured.")
 
+            polling_stop = asyncio.Event()
+
+            async def telegram_error_handler(update, context) -> None:
+                if self.is_conflict_error(context.error):
+                    self.mark_polling_conflict(source_module, context.error)
+                    self.logger.warning(
+                        "Telegram polling conflict detected, alerts sending will continue, scanning will continue."
+                    )
+                    polling_stop.set()
+                    return
+                self.logger.exception("Telegram application error: %s", context.error)
+
             application = Application.builder().token(self.settings.telegram_bot_token).build()
             application.add_handler(CommandHandler("report", report))
+            application.add_error_handler(telegram_error_handler)
+            self.logger.info("Telegram admin command polling starting by module=%s.", source_module)
+            await application.initialize()
+            await application.start()
+            if not application.updater:
+                raise RuntimeError("Telegram Application updater is unavailable.")
+            await application.updater.start_polling(
+                bootstrap_retries=0,
+                error_callback=lambda exc: application.create_task(
+                    application.process_error(error=exc, update=None)
+                ),
+            )
+            self.mark_polling_stable(source_module)
             self.logger.info("Telegram admin command polling started by module=%s.", source_module)
-            application.run_polling(close_loop=False, stop_signals=None)
+            await polling_stop.wait()
         except Exception as exc:
             if self.is_conflict_error(exc):
                 self.mark_polling_conflict(source_module, exc)
@@ -108,14 +145,46 @@ class TelegramAlertBot:
                 )
                 return
             self.logger.exception("Telegram command polling stopped: %s", exc)
+        finally:
+            if application is not None:
+                await self.shutdown_application(application)
+
+    async def shutdown_application(self, application) -> None:
+        try:
+            if application.updater and application.updater.running:
+                await application.updater.stop()
+        except Exception as exc:
+            self.logger.debug("Telegram updater stop skipped: %s", exc)
+        try:
+            if application.running:
+                await application.stop()
+        except Exception as exc:
+            self.logger.debug("Telegram application stop skipped: %s", exc)
+        try:
+            await application.shutdown()
+        except Exception as exc:
+            self.logger.debug("Telegram application shutdown skipped: %s", exc)
+
+    def mark_polling_stable(self, source_module: str) -> None:
+        global TELEGRAM_POLLING_STARTING, TELEGRAM_POLLING_STARTED, TELEGRAM_POLLING_SKIPPED_REASON
+        with TELEGRAM_POLLING_LOCK:
+            TELEGRAM_POLLING_STARTING = False
+            TELEGRAM_POLLING_STARTED = True
+            TELEGRAM_POLLING_SKIPPED_REASON = "none"
+        self.log_polling_startup(started=True, skipped_reason="none", source_module=source_module)
 
     def mark_polling_conflict(self, source_module: str, exc: Exception) -> None:
-        global TELEGRAM_POLLING_STARTED, TELEGRAM_POLLING_SKIPPED_REASON, TELEGRAM_POLLING_DISABLED_REASON
+        global TELEGRAM_POLLING_STARTING, TELEGRAM_POLLING_STARTED, TELEGRAM_POLLING_SKIPPED_REASON
+        global TELEGRAM_POLLING_DISABLED_REASON
         with TELEGRAM_POLLING_LOCK:
+            TELEGRAM_POLLING_STARTING = False
             TELEGRAM_POLLING_STARTED = False
             TELEGRAM_POLLING_SKIPPED_REASON = "conflict_detected"
             TELEGRAM_POLLING_DISABLED_REASON = str(exc)
         self.logger.warning("Telegram polling disabled for commands after Conflict. module=%s", source_module)
+        self.logger.warning("TELEGRAM_POLLING_CONFLICT_CAUGHT=True")
+        self.logger.warning("TELEGRAM_COMMAND_POLLING_DISABLED=True")
+        self.logger.warning("ALERTS_SENDMESSAGE_STILL_ENABLED=True")
 
     def log_polling_startup(self, started: bool, skipped_reason: str, source_module: str) -> None:
         self.logger.info("SERVICE_ROLE=%s", self.settings.service_role)
