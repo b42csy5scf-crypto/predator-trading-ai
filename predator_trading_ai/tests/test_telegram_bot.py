@@ -1,5 +1,4 @@
 import asyncio
-from types import SimpleNamespace
 
 import predator_trading_ai.alerts.telegram_bot as telegram_module
 from predator_trading_ai.alerts.telegram_bot import TelegramAlertBot
@@ -183,68 +182,60 @@ def test_command_polling_does_not_retry_after_conflict(monkeypatch) -> None:
     reset_polling_globals()
 
 
-def test_polling_background_conflict_is_caught(monkeypatch) -> None:
+def test_manual_get_updates_conflict_is_caught(monkeypatch) -> None:
     reset_polling_globals()
 
-    class FakeUpdater:
-        running = True
+    class FakeBot:
+        def __init__(self, token):
+            self.token = token
 
-        async def start_polling(self, **kwargs):
-            kwargs["error_callback"](Exception("terminated by other getUpdates request"))
+        async def get_updates(self, **kwargs):
+            raise Exception("terminated by other getUpdates request")
 
-        async def stop(self):
-            self.running = False
+    import telegram
 
-    class FakeApplication:
-        def __init__(self):
-            self.updater = FakeUpdater()
-            self.running = True
-            self.error_handler = None
-
-        def add_handler(self, handler):
-            self.handler = handler
-
-        def add_error_handler(self, handler):
-            self.error_handler = handler
-
-        async def initialize(self):
-            pass
-
-        async def start(self):
-            pass
-
-        def create_task(self, coro):
-            return asyncio.create_task(coro)
-
-        async def process_error(self, error, update):
-            await self.error_handler(update, SimpleNamespace(error=error))
-
-        async def stop(self):
-            self.running = False
-
-        async def shutdown(self):
-            pass
-
-    class FakeBuilder:
-        def token(self, token):
-            return self
-
-        def build(self):
-            return FakeApplication()
-
-    class FakeApplicationFactory:
-        @staticmethod
-        def builder():
-            return FakeBuilder()
-
-    import telegram.ext
-
-    monkeypatch.setattr(telegram.ext, "Application", FakeApplicationFactory)
+    monkeypatch.setattr(telegram, "Bot", FakeBot)
     bot = TelegramAlertBot(Settings(telegram_bot_token="token"))
 
-    asyncio.run(bot._run_command_polling_async("test.background"))
+    asyncio.run(bot._run_command_polling_async("test.manual"))
 
     assert telegram_module.TELEGRAM_POLLING_STARTED is False
     assert telegram_module.TELEGRAM_POLLING_SKIPPED_REASON == "conflict_detected"
     assert "getUpdates" in telegram_module.TELEGRAM_POLLING_DISABLED_REASON
     reset_polling_globals()
+
+
+def test_report_command_is_handled_without_application_polling(monkeypatch) -> None:
+    sent: list[tuple[str, str]] = []
+
+    class FakeMessage:
+        text = "/report"
+
+    update = type(
+        "FakeUpdate",
+        (),
+        {
+            "message": FakeMessage(),
+            "effective_chat": type("FakeChat", (), {"id": "123"})(),
+        },
+    )()
+
+    class FakeBot:
+        async def send_message(self, chat_id, text):
+            sent.append((chat_id, text))
+
+    class FakeRunner:
+        def __init__(self, settings, db):
+            pass
+
+        async def build_and_send(self):
+            return type("Result", (), {"sent": True})()
+
+    import predator_trading_ai.reports.report_runner as report_runner
+
+    monkeypatch.setattr(report_runner, "PerformanceReportRunner", FakeRunner)
+    bot = TelegramAlertBot(Settings(telegram_bot_token="token", telegram_chat_id="123"))
+
+    asyncio.run(bot.handle_command_update(FakeBot(), update))
+
+    assert sent == [("123", "Generating Predator performance report...")]

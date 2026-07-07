@@ -89,54 +89,40 @@ class TelegramAlertBot:
             self.log_polling_startup(started=False, skipped_reason="none", source_module=source_module)
 
     def _run_command_polling(self, source_module: str = "unknown") -> None:
-        asyncio.run(self._run_command_polling_async(source_module))
+        try:
+            asyncio.run(self._run_command_polling_async(source_module))
+        except Exception as exc:
+            self.logger.exception("Telegram command polling thread exited safely: %s", exc)
 
     async def _run_command_polling_async(self, source_module: str = "unknown") -> None:
-        application = None
         try:
-            from telegram.ext import Application, CommandHandler
+            from telegram import Bot
 
-            async def report(update, context) -> None:
-                from predator_trading_ai.reports.report_runner import PerformanceReportRunner
-
-                chat_id = str(update.effective_chat.id) if update.effective_chat else ""
-                if chat_id not in self.configured_chat_ids():
-                    await update.message.reply_text("Unauthorized.")
-                    return
-                await update.message.reply_text("Generating Predator performance report...")
-                result = await PerformanceReportRunner(self.settings, self.db).build_and_send()
-                if not result.sent:
-                    await update.message.reply_text("Report generated, but Telegram recipients are not configured.")
-
-            polling_stop = asyncio.Event()
-
-            async def telegram_error_handler(update, context) -> None:
-                if self.is_conflict_error(context.error):
-                    self.mark_polling_conflict(source_module, context.error)
-                    self.logger.warning(
-                        "Telegram polling conflict detected, alerts sending will continue, scanning will continue."
-                    )
-                    polling_stop.set()
-                    return
-                self.logger.exception("Telegram application error: %s", context.error)
-
-            application = Application.builder().token(self.settings.telegram_bot_token).build()
-            application.add_handler(CommandHandler("report", report))
-            application.add_error_handler(telegram_error_handler)
+            bot = Bot(self.settings.telegram_bot_token)
             self.logger.info("Telegram admin command polling starting by module=%s.", source_module)
-            await application.initialize()
-            await application.start()
-            if not application.updater:
-                raise RuntimeError("Telegram Application updater is unavailable.")
-            await application.updater.start_polling(
-                bootstrap_retries=0,
-                error_callback=lambda exc: application.create_task(
-                    application.process_error(error=exc, update=None)
-                ),
-            )
             self.mark_polling_stable(source_module)
             self.logger.info("Telegram admin command polling started by module=%s.", source_module)
-            await polling_stop.wait()
+            offset: Optional[int] = None
+            while True:
+                try:
+                    updates = await bot.get_updates(
+                        offset=offset,
+                        timeout=20,
+                        allowed_updates=["message"],
+                    )
+                except Exception as exc:
+                    if self.is_conflict_error(exc):
+                        self.mark_polling_conflict(source_module, exc)
+                        self.logger.warning(
+                            "Telegram polling conflict detected, alerts sending will continue, scanning will continue."
+                        )
+                        return
+                    self.logger.exception("Telegram getUpdates failed; retrying command polling: %s", exc)
+                    await asyncio.sleep(5)
+                    continue
+                for update in updates:
+                    offset = int(update.update_id) + 1
+                    await self.handle_command_update(bot, update)
         except Exception as exc:
             if self.is_conflict_error(exc):
                 self.mark_polling_conflict(source_module, exc)
@@ -145,25 +131,26 @@ class TelegramAlertBot:
                 )
                 return
             self.logger.exception("Telegram command polling stopped: %s", exc)
-        finally:
-            if application is not None:
-                await self.shutdown_application(application)
 
-    async def shutdown_application(self, application) -> None:
-        try:
-            if application.updater and application.updater.running:
-                await application.updater.stop()
-        except Exception as exc:
-            self.logger.debug("Telegram updater stop skipped: %s", exc)
-        try:
-            if application.running:
-                await application.stop()
-        except Exception as exc:
-            self.logger.debug("Telegram application stop skipped: %s", exc)
-        try:
-            await application.shutdown()
-        except Exception as exc:
-            self.logger.debug("Telegram application shutdown skipped: %s", exc)
+    async def handle_command_update(self, bot, update) -> None:
+        message = getattr(update, "message", None)
+        if message is None or not getattr(message, "text", ""):
+            return
+        if not str(message.text).strip().startswith("/report"):
+            return
+        chat_id = str(update.effective_chat.id) if getattr(update, "effective_chat", None) else ""
+        if chat_id not in self.configured_chat_ids():
+            await bot.send_message(chat_id=chat_id, text="Unauthorized.")
+            return
+        await bot.send_message(chat_id=chat_id, text="Generating Predator performance report...")
+        from predator_trading_ai.reports.report_runner import PerformanceReportRunner
+
+        result = await PerformanceReportRunner(self.settings, self.db).build_and_send()
+        if not result.sent:
+            await bot.send_message(
+                chat_id=chat_id,
+                text="Report generated, but Telegram recipients are not configured.",
+            )
 
     def mark_polling_stable(self, source_module: str) -> None:
         global TELEGRAM_POLLING_STARTING, TELEGRAM_POLLING_STARTED, TELEGRAM_POLLING_SKIPPED_REASON
