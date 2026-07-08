@@ -131,6 +131,18 @@ class ActiveSignalTracker:
         )
         return int(rows[0]["count"]) if rows else 0
 
+    def has_active_signal(self, ticker: str) -> bool:
+        rows = self.db.fetch_all(
+            """
+            SELECT 1
+            FROM active_signals
+            WHERE ticker = ? AND status = 'active'
+            LIMIT 1
+            """,
+            [ticker],
+        )
+        return bool(rows)
+
     def _evaluate_row(self, row, current_price: float) -> list[SignalUpdate]:
         signal_id = int(row["id"])
         direction = row["direction"]

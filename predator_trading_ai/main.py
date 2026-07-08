@@ -216,144 +216,231 @@ class PredatorTradingAI:
 
     def process_ticker(self, ticker: str) -> None:
         self.logger.info("Processing %s.", ticker)
-        bars = self.retry.run(
-            f"market bars {ticker}",
-            lambda: self.market_data.get_recent_bars(ticker, lookback_days=10, timeframe="5Min"),
-            fallback=None,
-        )
-        if bars is None:
-            raise RuntimeError(f"{ticker} market bars failed after retries")
-        if bars.empty:
-            self.logger.warning("Skipping %s: no market bars available.", ticker)
-            return
-
-        snapshot = self.retry.run(
-            f"latest snapshot {ticker}",
-            lambda: self.market_data.get_latest_snapshot(ticker),
-            fallback=None,
-        )
-        regime = self.regime_detector.detect(
-            bars,
-            spy_bars=self.market_context.get("SPY"),
-            qqq_bars=self.market_context.get("QQQ"),
-            vix_level=self.market_context.get("VIX"),
-            breadth_score=self.market_context.get("breadth_score"),
-        )
-        self.log_regime(ticker, regime)
-        if snapshot is None:
-            self.logger.warning("Skipping %s signal generation: latest quote/trade snapshot missing.", ticker)
-            return
-        self.process_active_signal_updates(ticker, snapshot.price)
-        if self.is_extreme_illiquidity(snapshot):
-            reason = f"extreme illiquidity or invalid spread: bid={snapshot.bid} ask={snapshot.ask}"
-            self.log_rejected_or_watch(ticker, bars, regime, "liquidity", reason, allow_watch=False)
-            self.logger.info(
-                "Ticker %s score=0 grade_candidate=blocked rejected_by=liquidity reason=%s",
-                ticker,
-                reason,
+        diagnostic = self.new_candidate_diagnostic(ticker)
+        try:
+            bars = self.retry.run(
+                f"market bars {ticker}",
+                lambda: self.market_data.get_recent_bars(ticker, lookback_days=10, timeframe="5Min"),
+                fallback=None,
             )
-            return
+            if bars is None:
+                self.add_rejection(diagnostic, "market bars failed after retries")
+                raise RuntimeError(f"{ticker} market bars failed after retries")
+            if bars.empty:
+                self.add_rejection(diagnostic, "missing/empty market data")
+                self.logger.warning("Skipping %s: no market bars available.", ticker)
+                return
 
-        options_confirmation = self.get_options_confirmation(ticker)
-        setup = self.strategy_engine.evaluate(
-            ticker=ticker,
-            bars=bars,
-            regime=regime,
-            options_confirmation=options_confirmation,
-        )
-        if setup is None:
-            self.log_rejected_or_watch(ticker, bars, regime, "strategy", "no valid strategy setup")
-            return
-
-        risk = self.evaluate_risk(setup, snapshot, regime, options_confirmation)
-        if not risk.approved:
-            grade_candidate = setup.signal_tier
-            reason = "; ".join(risk.reasons)
-            self.record_signal_suppressed(f"risk: {reason}")
-            diagnostics = self.shadow_logger.diagnostics(ticker, bars, {**self.state.active_positions, **self.state.active_signals}, score=setup.score)
-            self.shadow_logger.log(
-                ticker,
-                "rejected",
-                regime,
-                diagnostics,
-                setup=setup,
-                risk=risk,
-                rejection_stage="risk",
-                rejection_reason=reason,
+            snapshot = self.retry.run(
+                f"latest snapshot {ticker}",
+                lambda: self.market_data.get_latest_snapshot(ticker),
+                fallback=None,
             )
-            self.logger.info(
-                "Ticker %s score=%.0f grade_candidate=%s rejected_by=risk reason=%s",
-                ticker,
-                setup.score,
-                grade_candidate,
-                reason,
+            regime = self.regime_detector.detect(
+                bars,
+                spy_bars=self.market_context.get("SPY"),
+                qqq_bars=self.market_context.get("QQQ"),
+                vix_level=self.market_context.get("VIX"),
+                breadth_score=self.market_context.get("breadth_score"),
             )
-            return
+            self.log_regime(ticker, regime)
+            if snapshot is None:
+                self.add_rejection(diagnostic, "missing latest quote/trade snapshot")
+                self.logger.warning("Skipping %s signal generation: latest quote/trade snapshot missing.", ticker)
+                return
+            self.process_active_signal_updates(ticker, snapshot.price)
+            if self.is_extreme_illiquidity(snapshot):
+                reason = f"extreme illiquidity or invalid spread: bid={snapshot.bid} ask={snapshot.ask}"
+                self.add_rejection(diagnostic, "liquidity/spread filter failed")
+                self.log_rejected_or_watch(ticker, bars, regime, "liquidity", reason, allow_watch=False)
+                self.logger.info(
+                    "Ticker %s score=0 grade_candidate=blocked rejected_by=liquidity reason=%s",
+                    ticker,
+                    reason,
+                )
+                return
 
-        alert_decision = self.alert_policy.evaluate(
-            ticker,
-            setup.signal_tier,
-            setup.score,
-            regime,
-            confirmations=setup.confirmations,
-            sector=SECTOR_BY_TICKER.get(ticker),
-            setup_reason=setup.reason,
-        )
-        if not alert_decision.allowed:
-            self.record_signal_suppressed(alert_decision.reason)
-            self.logger.info(
-                "Telegram alert suppressed for %s grade=%s score=%.0f: %s",
+            options_confirmation = self.get_options_confirmation(ticker)
+            setup = self.strategy_engine.evaluate(
+                ticker=ticker,
+                bars=bars,
+                regime=regime,
+                options_confirmation=options_confirmation,
+            )
+            if setup is None:
+                watch_evaluation = self.log_rejected_or_watch(ticker, bars, regime, "strategy", "no valid strategy setup")
+                self.update_diagnostic_from_watch(diagnostic, watch_evaluation)
+                self.add_strategy_rejections(diagnostic, watch_evaluation)
+                return
+
+            diagnostic["score"] = setup.score
+            diagnostic["grade"] = setup.signal_tier
+            if self.active_signal_tracker.has_active_signal(ticker):
+                self.add_rejection(diagnostic, "Already active signal")
+
+            risk = self.evaluate_risk(setup, snapshot, regime, options_confirmation)
+            if not risk.approved:
+                grade_candidate = setup.signal_tier
+                reason = "; ".join(risk.reasons)
+                self.add_rejection(diagnostic, f"Risk engine rejected: {reason}")
+                self.record_signal_suppressed(f"risk: {reason}")
+                diagnostics = self.shadow_logger.diagnostics(ticker, bars, {**self.state.active_positions, **self.state.active_signals}, score=setup.score)
+                self.shadow_logger.log(
+                    ticker,
+                    "rejected",
+                    regime,
+                    diagnostics,
+                    setup=setup,
+                    risk=risk,
+                    rejection_stage="risk",
+                    rejection_reason=reason,
+                )
+                self.logger.info(
+                    "Ticker %s score=%.0f grade_candidate=%s rejected_by=risk reason=%s",
+                    ticker,
+                    setup.score,
+                    grade_candidate,
+                    reason,
+                )
+                return
+
+            alert_decision = self.alert_policy.evaluate(
                 ticker,
                 setup.signal_tier,
                 setup.score,
-                alert_decision.reason,
+                regime,
+                confirmations=setup.confirmations,
+                sector=SECTOR_BY_TICKER.get(ticker),
+                setup_reason=setup.reason,
+            )
+            if not alert_decision.allowed:
+                self.add_rejection(diagnostic, alert_decision.reason)
+                self.record_signal_suppressed(alert_decision.reason)
+                self.logger.info(
+                    "Telegram alert suppressed for %s grade=%s score=%.0f: %s",
+                    ticker,
+                    setup.signal_tier,
+                    setup.score,
+                    alert_decision.reason,
+                )
+                return
+            alert_key = self.alert_cooldown_key(ticker, setup.signal_tier)
+            if self.state_store.is_on_cooldown(self.state, alert_key, self.alert_cooldown_seconds):
+                self.add_rejection(diagnostic, "Cooldown active")
+                self.record_signal_suppressed("duplicate cooldown")
+                self.logger.info("Skipping duplicate %s alert for %s due to cooldown.", setup.signal_tier, ticker)
+                return
+
+            expected_win_rate = self.expected_win_rate(ticker, setup.setup_type)
+            signal = self.signal_engine.build_signal(setup, risk, regime, expected_win_rate)
+            if signal is None:
+                self.add_rejection(diagnostic, "Signal engine returned no signal")
+                self.logger.info("Signal not created for %s after risk evaluation.", ticker)
+                return
+
+            diagnostic["passed"] = True
+            self.logger.info(
+                "Signal generated: %s grade=%s setup=%s confidence=%.0f",
+                ticker,
+                setup.signal_tier,
+                signal.setup_type,
+                signal.confidence,
+            )
+            self.state.active_signals[alert_key] = {
+                "ticker": ticker,
+                "setup_type": setup.setup_type,
+                "direction": setup.direction,
+                "grade": setup.signal_tier,
+                "confidence": signal.confidence,
+                "sector": SECTOR_BY_TICKER.get(ticker),
+                "correlation_group": CORRELATION_GROUP_BY_TICKER.get(ticker),
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+            message = SignalEngine.format_alert(signal, label=setup.signal_tier)
+            self.log_sent_alert(ticker, setup.signal_tier, "trade_candidate", setup.score, setup.setup_type, regime.regime, message)
+            self.alert_policy.record(ticker, setup.signal_tier)
+            self.logger.info("Sending signal to Telegram: %s grade=%s", ticker, setup.signal_tier)
+            signal_id = self.active_signal_tracker.register_trading_signal(signal, setup.signal_tier)
+            self.logger.info(
+                "Added to ActiveSignalTracker confirmed ticker=%s id=%s active_signals=%d",
+                ticker,
+                signal_id,
+                self.active_signal_tracker.active_count(),
+            )
+            self.state.last_telegram_alert = alert_key
+            self.state_store.set_cooldown(self.state, alert_key)
+            asyncio.run(self.telegram_bot.send_message(message))
+            self.logger.info("Signal sent to Telegram: %s grade=%s", ticker, setup.signal_tier)
+            self.record_signal_generated()
+        finally:
+            self.log_candidate_diagnostic(diagnostic)
+
+    @staticmethod
+    def new_candidate_diagnostic(ticker: str) -> dict:
+        return {
+            "ticker": ticker,
+            "score": None,
+            "grade": "unknown",
+            "passed": False,
+            "rejections": [],
+        }
+
+    @staticmethod
+    def add_rejection(diagnostic: dict, reason: str) -> None:
+        if reason and reason not in diagnostic["rejections"]:
+            diagnostic["rejections"].append(reason)
+
+    @staticmethod
+    def update_diagnostic_from_watch(diagnostic: dict, watch_evaluation) -> None:
+        if watch_evaluation is None:
+            return
+        diagnostic["score"] = watch_evaluation.score
+        diagnostic["grade"] = watch_evaluation.grade_candidate
+
+    def add_strategy_rejections(self, diagnostic: dict, watch_evaluation) -> None:
+        if watch_evaluation is None:
+            self.add_rejection(diagnostic, "No strategy candidate produced")
+            return
+        if watch_evaluation.rejected_by and watch_evaluation.rejected_by != "none":
+            self.add_rejection(diagnostic, f"{watch_evaluation.rejected_by} filter failed")
+        for part in self.split_rejection_reasons(watch_evaluation.reason):
+            self.add_rejection(diagnostic, part)
+        if watch_evaluation.grade_candidate in {"B Watch Alert", "C Risky/Early Alert"}:
+            self.add_rejection(diagnostic, "Grade below A")
+
+    @staticmethod
+    def split_rejection_reasons(reason: str) -> list[str]:
+        return [
+            part.strip()
+            for part in (reason or "").replace("watch risks:", ";").split(";")
+            if part.strip()
+        ]
+
+    def log_candidate_diagnostic(self, diagnostic: dict) -> None:
+        score = diagnostic["score"]
+        score_text = "unknown" if score is None else f"{float(score):.0f}"
+        header = (
+            "Candidate diagnostic\n"
+            f"Ticker={diagnostic['ticker']}\n"
+            f"Final score={score_text}\n"
+            f"Grade={diagnostic['grade']}\n"
+            f"{'Passed' if diagnostic['passed'] else 'Failed'}"
+        )
+        if diagnostic["passed"]:
+            self.logger.info(
+                "%s\nCandidate accepted:\nTicker=%s\nScore=%s\nGrade=%s",
+                header,
+                diagnostic["ticker"],
+                score_text,
+                diagnostic["grade"],
             )
             return
-        alert_key = self.alert_cooldown_key(ticker, setup.signal_tier)
-        if self.state_store.is_on_cooldown(self.state, alert_key, self.alert_cooldown_seconds):
-            self.record_signal_suppressed("duplicate cooldown")
-            self.logger.info("Skipping duplicate %s alert for %s due to cooldown.", setup.signal_tier, ticker)
-            return
-
-        expected_win_rate = self.expected_win_rate(ticker, setup.setup_type)
-        signal = self.signal_engine.build_signal(setup, risk, regime, expected_win_rate)
-        if signal is None:
-            self.logger.info("Signal not created for %s after risk evaluation.", ticker)
-            return
-
+        reasons = diagnostic["rejections"] or ["No candidate accepted"]
         self.logger.info(
-            "Signal generated: %s grade=%s setup=%s confidence=%.0f",
-            ticker,
-            setup.signal_tier,
-            signal.setup_type,
-            signal.confidence,
+            "%s\nRejected:\n%s",
+            header,
+            "\n".join(f"- {reason}" for reason in reasons),
         )
-        self.state.active_signals[alert_key] = {
-            "ticker": ticker,
-            "setup_type": setup.setup_type,
-            "direction": setup.direction,
-            "grade": setup.signal_tier,
-            "confidence": signal.confidence,
-            "sector": SECTOR_BY_TICKER.get(ticker),
-            "correlation_group": CORRELATION_GROUP_BY_TICKER.get(ticker),
-            "created_at": datetime.now(timezone.utc).isoformat(),
-        }
-        message = SignalEngine.format_alert(signal, label=setup.signal_tier)
-        self.log_sent_alert(ticker, setup.signal_tier, "trade_candidate", setup.score, setup.setup_type, regime.regime, message)
-        self.alert_policy.record(ticker, setup.signal_tier)
-        self.logger.info("Sending signal to Telegram: %s grade=%s", ticker, setup.signal_tier)
-        signal_id = self.active_signal_tracker.register_trading_signal(signal, setup.signal_tier)
-        self.logger.info(
-            "Added to ActiveSignalTracker confirmed ticker=%s id=%s active_signals=%d",
-            ticker,
-            signal_id,
-            self.active_signal_tracker.active_count(),
-        )
-        self.state.last_telegram_alert = alert_key
-        self.state_store.set_cooldown(self.state, alert_key)
-        asyncio.run(self.telegram_bot.send_message(message))
-        self.logger.info("Signal sent to Telegram: %s grade=%s", ticker, setup.signal_tier)
-        self.record_signal_generated()
 
     def log_rejected_or_watch(
         self,
@@ -363,7 +450,7 @@ class PredatorTradingAI:
         stage: str,
         reason: str,
         allow_watch: bool = True,
-    ) -> None:
+    ):
         diagnostics = self.shadow_logger.diagnostics(ticker, bars, {**self.state.active_positions, **self.state.active_signals})
         watch_evaluation = self.strategy_engine.evaluate_watch_candidate(ticker, bars, regime) if allow_watch else None
         if watch_evaluation is not None:
@@ -380,10 +467,11 @@ class PredatorTradingAI:
             diagnostics = self.shadow_logger.diagnostics(ticker, bars, {**self.state.active_positions, **self.state.active_signals}, score=watch.score)
             self.shadow_logger.log(ticker, "watch_alert", regime, diagnostics, setup=watch)
             self.send_watch_alert(ticker, watch, regime)
-            return
+            return watch_evaluation
         if watch_evaluation is not None:
             reason = f"{reason}; candidate_score={watch_evaluation.score:.0f}; grade_candidate={watch_evaluation.grade_candidate}; {watch_evaluation.reason}"
         self.shadow_logger.log(ticker, "rejected", regime, diagnostics, rejection_stage=stage, rejection_reason=reason)
+        return watch_evaluation
 
     def send_watch_alert(self, ticker: str, setup: StrategySetup, regime: MarketRegime) -> None:
         if not self.settings.enable_watchlist_alerts:
