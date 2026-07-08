@@ -321,7 +321,13 @@ class PredatorTradingAI:
             self.logger.info("Signal not created for %s after risk evaluation.", ticker)
             return
 
-        self.logger.info("%s generated for %s: %s %.0f%%", setup.signal_tier, ticker, signal.setup_type, signal.confidence)
+        self.logger.info(
+            "Signal generated: %s grade=%s setup=%s confidence=%.0f",
+            ticker,
+            setup.signal_tier,
+            signal.setup_type,
+            signal.confidence,
+        )
         self.state.active_signals[alert_key] = {
             "ticker": ticker,
             "setup_type": setup.setup_type,
@@ -335,10 +341,18 @@ class PredatorTradingAI:
         message = SignalEngine.format_alert(signal, label=setup.signal_tier)
         self.log_sent_alert(ticker, setup.signal_tier, "trade_candidate", setup.score, setup.setup_type, regime.regime, message)
         self.alert_policy.record(ticker, setup.signal_tier)
-        self.active_signal_tracker.register_trading_signal(signal, setup.signal_tier)
+        self.logger.info("Sending signal to Telegram: %s grade=%s", ticker, setup.signal_tier)
+        signal_id = self.active_signal_tracker.register_trading_signal(signal, setup.signal_tier)
+        self.logger.info(
+            "Added to ActiveSignalTracker confirmed ticker=%s id=%s active_signals=%d",
+            ticker,
+            signal_id,
+            self.active_signal_tracker.active_count(),
+        )
         self.state.last_telegram_alert = alert_key
         self.state_store.set_cooldown(self.state, alert_key)
         asyncio.run(self.telegram_bot.send_message(message))
+        self.logger.info("Signal sent to Telegram: %s grade=%s", ticker, setup.signal_tier)
         self.record_signal_generated()
 
     def log_rejected_or_watch(

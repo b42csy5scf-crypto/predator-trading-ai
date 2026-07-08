@@ -6,6 +6,7 @@ from predator_trading_ai.config import Settings, get_settings
 from predator_trading_ai.database.db import Database
 from predator_trading_ai.engines.signal_engine import TradingSignal
 from predator_trading_ai.engines.strategy_engine import StrategySetup
+from predator_trading_ai.utils.logger import setup_logger
 
 
 @dataclass(frozen=True)
@@ -22,6 +23,7 @@ class ActiveSignalTracker:
     def __init__(self, db: Database, settings: Optional[Settings] = None) -> None:
         self.db = db
         self.settings = settings or get_settings()
+        self.logger = setup_logger(__name__, self.settings.log_level)
 
     def register_trading_signal(self, signal: TradingSignal, grade: str) -> int:
         return self.register(
@@ -57,6 +59,10 @@ class ActiveSignalTracker:
         sent_at: Optional[datetime] = None,
     ) -> int:
         timestamp = (sent_at or datetime.now(timezone.utc)).isoformat()
+        superseded = self.db.fetch_all(
+            "SELECT id, ticker, grade FROM active_signals WHERE ticker = ? AND status = 'active'",
+            [ticker],
+        )
         self.db.execute(
             """
             UPDATE active_signals
@@ -65,7 +71,14 @@ class ActiveSignalTracker:
             """,
             [timestamp, timestamp, ticker],
         )
-        return self.db.insert_dict(
+        for row in superseded:
+            self.logger.info(
+                "Removed from ActiveSignalTracker ticker=%s id=%s grade=%s Reason=DUPLICATE",
+                row["ticker"],
+                row["id"],
+                row["grade"],
+            )
+        signal_id = self.db.insert_dict(
             "active_signals",
             {
                 "ticker": ticker,
@@ -82,6 +95,14 @@ class ActiveSignalTracker:
                 "status": "active",
             },
         )
+        self.logger.info(
+            "Added to ActiveSignalTracker ticker=%s id=%s grade=%s active_signals=%d",
+            ticker,
+            signal_id,
+            grade,
+            self.active_count(),
+        )
+        return signal_id
 
     def check_ticker(self, ticker: str, current_price: float) -> list[SignalUpdate]:
         rows = self.db.fetch_all(
@@ -221,6 +242,10 @@ class ActiveSignalTracker:
         )
 
     def _close(self, signal_id: int, price: float, reason: str) -> None:
+        rows = self.db.fetch_all(
+            "SELECT ticker, grade FROM active_signals WHERE id = ?",
+            [signal_id],
+        )
         self.db.execute(
             """
             UPDATE active_signals
@@ -229,6 +254,16 @@ class ActiveSignalTracker:
             WHERE id = ?
             """,
             [price, reason, signal_id],
+        )
+        ticker = rows[0]["ticker"] if rows else "unknown"
+        grade = rows[0]["grade"] if rows else "unknown"
+        self.logger.info(
+            "Removed from ActiveSignalTracker ticker=%s id=%s grade=%s Reason=%s active_signals=%d",
+            ticker,
+            signal_id,
+            grade,
+            self.removal_reason_label(reason),
+            self.active_count(),
         )
 
     def _record_completed_trade(
@@ -311,6 +346,18 @@ class ActiveSignalTracker:
         except (KeyError, IndexError):
             value = None
         return float(value) if value is not None else float(row["stop_loss"])
+
+    @staticmethod
+    def removal_reason_label(reason: str) -> str:
+        mapping = {
+            "tp3_completed": "TP_HIT",
+            "invalidated": "SL_HIT",
+            "breakeven_after_tp1": "BREAKEVEN",
+            "superseded": "DUPLICATE",
+            "expired": "EXPIRED",
+            "manual": "MANUAL",
+        }
+        return mapping.get(reason, "ERROR")
 
     def _matching_sent_alert(self, row):
         rows = self.db.fetch_all(
