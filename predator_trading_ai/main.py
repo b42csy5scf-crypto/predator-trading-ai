@@ -332,11 +332,33 @@ class PredatorTradingAI:
                 return
 
             expected_win_rate = self.expected_win_rate(ticker, setup.setup_type)
+            self.logger.info(
+                "Entering signal generation ticker=%s grade=%s score=%.0f",
+                ticker,
+                setup.signal_tier,
+                setup.score,
+            )
             signal = self.signal_engine.build_signal(setup, risk, regime, expected_win_rate)
             if signal is None:
                 self.add_rejection(diagnostic, "Signal engine returned no signal")
+                self.logger.info(
+                    "Signal engine returned None ticker=%s reason=%s",
+                    ticker,
+                    "signal_engine.build_signal returned None",
+                )
+                self.logger.info(
+                    "Early return after candidate accepted ticker=%s reason=%s",
+                    ticker,
+                    "signal engine returned None",
+                )
                 self.logger.info("Signal not created for %s after risk evaluation.", ticker)
                 return
+            self.logger.info(
+                "Signal engine returned signal ticker=%s grade=%s confidence=%.0f",
+                ticker,
+                setup.signal_tier,
+                signal.confidence,
+            )
 
             diagnostic["passed"] = True
             self.logger.info(
@@ -359,7 +381,17 @@ class PredatorTradingAI:
             message = SignalEngine.format_alert(signal, label=setup.signal_tier)
             self.log_sent_alert(ticker, setup.signal_tier, "trade_candidate", setup.score, setup.setup_type, regime.regime, message)
             self.alert_policy.record(ticker, setup.signal_tier)
+            self.logger.info(
+                "Preparing Telegram dispatch ticker=%s grade=%s",
+                ticker,
+                setup.signal_tier,
+            )
             self.logger.info("Sending signal to Telegram: %s grade=%s", ticker, setup.signal_tier)
+            self.logger.info(
+                "Preparing ActiveSignalTracker add ticker=%s grade=%s",
+                ticker,
+                setup.signal_tier,
+            )
             signal_id = self.active_signal_tracker.register_trading_signal(signal, setup.signal_tier)
             self.logger.info(
                 "Added to ActiveSignalTracker confirmed ticker=%s id=%s active_signals=%d",
