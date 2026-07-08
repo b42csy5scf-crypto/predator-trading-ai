@@ -93,6 +93,23 @@ class ActiveSignalTracker:
             updates.extend(self._evaluate_row(row, current_price))
         return updates
 
+    def active_tickers(self) -> list[str]:
+        rows = self.db.fetch_all(
+            """
+            SELECT DISTINCT ticker
+            FROM active_signals
+            WHERE status = 'active'
+            ORDER BY ticker
+            """
+        )
+        return [str(row["ticker"]) for row in rows]
+
+    def active_count(self) -> int:
+        rows = self.db.fetch_all(
+            "SELECT COUNT(*) AS count FROM active_signals WHERE status = 'active'"
+        )
+        return int(rows[0]["count"]) if rows else 0
+
     def _evaluate_row(self, row, current_price: float) -> list[SignalUpdate]:
         signal_id = int(row["id"])
         direction = row["direction"]

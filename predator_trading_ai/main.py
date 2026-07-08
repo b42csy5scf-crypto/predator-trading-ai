@@ -20,6 +20,7 @@ from predator_trading_ai.engines.risk_engine import RiskEngine
 from predator_trading_ai.engines.shadow_mode import ShadowModeLogger
 from predator_trading_ai.engines.signal_engine import SignalEngine
 from predator_trading_ai.engines.strategy_engine import StrategyEngine, StrategySetup
+from predator_trading_ai.reports.report_runner import PerformanceReportRunner
 from predator_trading_ai.state.runtime_state import RuntimeState, RuntimeStateStore
 from predator_trading_ai.utils.logger import setup_logger
 from predator_trading_ai.utils.reliability import CircuitBreaker, HealthMonitor, RetryPolicy
@@ -51,6 +52,8 @@ class PredatorTradingAI:
         self.signal_engine = SignalEngine(self.db)
         self.alert_policy = AlertPolicy(self.settings, self.db)
         self.active_signal_tracker = ActiveSignalTracker(self.db, self.settings)
+        self.performance_report_runner: Optional[PerformanceReportRunner] = None
+        self.tp_sl_monitor_started = False
         self.shadow_logger = ShadowModeLogger(self.db)
         self.telegram_bot = TelegramAlertBot(self.settings, self.db)
         self.retry = RetryPolicy(
@@ -85,6 +88,7 @@ class PredatorTradingAI:
         )
         self.logger.info("Watchlist: %s", ", ".join(self.watchlist))
         self.logger.info("Loop interval: %s seconds", self.settings.loop_interval_seconds)
+        self.start_monitoring_workers()
         self.telegram_bot.start_command_polling(source_module="predator_trading_ai.main")
         if self.state.safe_mode:
             self.logger.warning("Recovered in SAFE MODE: %s", self.state.safe_mode_reason)
@@ -154,6 +158,7 @@ class PredatorTradingAI:
         self.logger.info("Starting market data iteration for %d tickers.", len(self.watchlist))
         self.reset_scan_alert_summary()
         self.market_context = self.load_market_context()
+        self.run_tp_sl_monitor()
         had_failure = False
         for ticker in self.watchlist:
             try:
@@ -175,6 +180,39 @@ class PredatorTradingAI:
             self.state_store.mark_scan(self.state)
             self.record_health("scanner", "ok", "iteration completed")
         self.log_scan_alert_summary()
+
+    def start_monitoring_workers(self) -> None:
+        self.logger.info("Starting ActiveSignalTracker...")
+        active_count = self.active_signal_tracker.active_count()
+        self.logger.info("ActiveSignalTracker started. active_signals=%d", active_count)
+
+        self.logger.info("Starting TP/SL monitor...")
+        self.tp_sl_monitor_started = True
+        self.logger.info("TP/SL monitor started.")
+
+        self.logger.info("Starting PerformanceReportRunner...")
+        self.performance_report_runner = PerformanceReportRunner(self.settings, self.db)
+        self.logger.info("PerformanceReportRunner started.")
+
+    def run_tp_sl_monitor(self) -> None:
+        if not self.tp_sl_monitor_started:
+            self.logger.warning("TP/SL monitor was not started; starting now.")
+            self.tp_sl_monitor_started = True
+        active_tickers = self.active_signal_tracker.active_tickers()
+        self.logger.info("TP/SL monitor running. active_tickers=%d", len(active_tickers))
+        for ticker in active_tickers:
+            try:
+                snapshot = self.retry.run(
+                    f"tp/sl latest snapshot {ticker}",
+                    lambda ticker=ticker: self.market_data.get_latest_snapshot(ticker),
+                    fallback=None,
+                )
+                if snapshot is None:
+                    self.logger.warning("TP/SL monitor skipped %s: latest snapshot missing.", ticker)
+                    continue
+                self.process_active_signal_updates(ticker, snapshot.price)
+            except Exception as exc:
+                self.logger.exception("TP/SL monitor failed for %s; continuing: %s", ticker, exc)
 
     def process_ticker(self, ticker: str) -> None:
         self.logger.info("Processing %s.", ticker)

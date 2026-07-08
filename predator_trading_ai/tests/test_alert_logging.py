@@ -1,7 +1,17 @@
+from dataclasses import dataclass
+
 from predator_trading_ai.config import Settings
 from predator_trading_ai.engines.regime_detector import MarketRegime
 from predator_trading_ai.engines.strategy_engine import StrategySetup
 from predator_trading_ai.main import PredatorTradingAI
+
+
+@dataclass(frozen=True)
+class FakeSnapshot:
+    price: float
+    bid: float = 0.0
+    ask: float = 0.0
+    volume: int = 0
 
 
 def test_alert_cooldown_uses_ticker_and_grade() -> None:
@@ -199,3 +209,54 @@ def test_scan_alert_summary_counts_generated_and_suppressed(tmp_path) -> None:
     assert app.scan_signals_suppressed == 3
     assert app.scan_suppression_reasons["duplicate cooldown"] == 2
     assert app.scan_suppression_reasons["C alerts disabled"] == 1
+
+
+def test_monitoring_workers_start_and_log(tmp_path, monkeypatch) -> None:
+    settings = Settings(database_url=f"sqlite:///{tmp_path / 'workers.db'}")
+    app = PredatorTradingAI(settings)
+    app.db.initialize()
+    log_messages: list[str] = []
+    original_info = app.logger.info
+
+    def capture_info(message, *args, **kwargs):
+        log_messages.append(message % args if args else message)
+        original_info(message, *args, **kwargs)
+
+    monkeypatch.setattr(app.logger, "info", capture_info)
+
+    app.start_monitoring_workers()
+
+    output = "\n".join(log_messages)
+    assert "Starting ActiveSignalTracker..." in output
+    assert "ActiveSignalTracker started." in output
+    assert "Starting TP/SL monitor..." in output
+    assert "TP/SL monitor started." in output
+    assert "Starting PerformanceReportRunner..." in output
+    assert "PerformanceReportRunner started." in output
+    assert app.tp_sl_monitor_started is True
+    assert app.performance_report_runner is not None
+
+
+def test_tp_sl_monitor_runs_active_signal_checks(tmp_path, monkeypatch) -> None:
+    settings = Settings(database_url=f"sqlite:///{tmp_path / 'tp_sl.db'}", telegram_bot_token=None)
+    app = PredatorTradingAI(settings)
+    app.db.initialize()
+    app.active_signal_tracker.register(
+        ticker="NVDA",
+        grade="A+ Signal",
+        direction="long",
+        entry_zone_low=124.50,
+        entry_zone_high=125.20,
+        stop_loss=121.80,
+        targets=(128.40, 130.00, 132.00),
+    )
+    monkeypatch.setattr(app.market_data, "get_latest_snapshot", lambda ticker: FakeSnapshot(price=128.55))
+
+    app.tp_sl_monitor_started = True
+    app.run_tp_sl_monitor()
+
+    updates = app.db.fetch_all("SELECT update_type FROM signal_updates ORDER BY id")
+    completed = app.db.fetch_all("SELECT outcome, status FROM completed_trades ORDER BY id")
+    assert [row["update_type"] for row in updates] == ["tp1"]
+    assert completed[0]["outcome"] == "TP1"
+    assert completed[0]["status"] == "active"

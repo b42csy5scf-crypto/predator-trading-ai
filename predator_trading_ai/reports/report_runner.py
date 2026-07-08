@@ -8,6 +8,7 @@ from predator_trading_ai.alerts.telegram_bot import TelegramAlertBot
 from predator_trading_ai.config import Settings, get_settings
 from predator_trading_ai.database.db import Database
 from predator_trading_ai.reports.trade_performance_report import TradePerformanceReport
+from predator_trading_ai.utils.logger import setup_logger
 
 
 @dataclass(frozen=True)
@@ -20,12 +21,16 @@ class PerformanceReportRunner:
     def __init__(self, settings: Optional[Settings] = None, db: Optional[Database] = None) -> None:
         self.settings = settings or get_settings()
         self.db = db or Database(self.settings)
+        self.logger = setup_logger(__name__, self.settings.log_level)
+        self.logger.info("PerformanceReportRunner initialized.")
 
     def build(self) -> str:
+        self.logger.info("PerformanceReportRunner building report.")
         self.db.initialize()
         return TradePerformanceReport(self.db).build()
 
     async def build_and_send(self) -> ReportRunResult:
+        self.logger.info("PerformanceReportRunner sending report via sendMessage.")
         report = self.build()
         bot = TelegramAlertBot(self.settings, self.db)
         await bot.send_message(report)
