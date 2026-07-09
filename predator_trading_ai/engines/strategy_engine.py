@@ -22,6 +22,7 @@ class StrategySetup:
     do_not_enter_conditions: list[str]
     signal_tier: str = "A Signal"
     confirmations: tuple[str, ...] = ()
+    scoring_components: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -30,6 +31,7 @@ class SetupQuality:
     score_bonus: float
     reasons: list[str]
     rejections: list[str]
+    components: list[str]
 
 
 @dataclass(frozen=True)
@@ -90,12 +92,18 @@ class StrategyEngine:
         best = max(valid, key=lambda setup: setup.score)
         bonus = quality.score_bonus
         reason_parts = [best.reason, *quality.reasons]
+        score_components = [
+            *best.scoring_components,
+            *quality.components,
+        ]
         if options_confirmation:
             bonus += 8
             reason_parts.append("options flow confirmation")
+            score_components.append("options flow confirmation:+8.00")
         if sentiment_confirmation and sentiment_confirmation.get("sentiment_score", 0) > 0.2:
             bonus += 2
             reason_parts.append("positive sentiment confirmation")
+            score_components.append("positive sentiment confirmation:+2.00")
 
         final_score = clamp(best.score + bonus, 0, 100)
         if final_score < self._score_threshold(regime):
@@ -121,6 +129,7 @@ class StrategyEngine:
             ],
             signal_tier=tier,
             confirmations=best.confirmations,
+            scoring_components=tuple(score_components),
         )
 
     def _score_threshold(self, regime: MarketRegime) -> float:
@@ -305,6 +314,7 @@ class StrategyEngine:
     ) -> SetupQuality:
         rejections: list[str] = []
         reasons: list[str] = []
+        components: list[str] = []
         bonus = 0.0
 
         if not (close > ema_50 >= ema_200):
@@ -312,17 +322,21 @@ class StrategyEngine:
         else:
             bonus += 8
             reasons.append("EMA50/EMA200 bull alignment")
+            components.append("EMA50/EMA200 bull alignment:+8.00")
 
         if volume_ratio < 1.0:
             rejections.append(f"relative volume too low: {volume_ratio:.2f}")
         elif volume_ratio >= 1.5:
             bonus += 6
             reasons.append(f"strong relative volume {volume_ratio:.2f}")
+            components.append("strong relative volume:+6.00")
         elif volume_ratio >= 1.15:
             bonus += 3
             reasons.append(f"acceptable relative volume {volume_ratio:.2f}")
+            components.append("acceptable relative volume:+3.00")
         else:
             reasons.append(f"volume building {volume_ratio:.2f}")
+            components.append("volume building:+0.00")
 
         distance_atr = abs(close - ema_21) / max(atr, close * 0.005)
         distance_ema50_atr = abs(close - ema_50) / max(atr, close * 0.005)
@@ -333,22 +347,27 @@ class StrategyEngine:
         elif distance_atr <= 1.2:
             bonus += 5
             reasons.append("entry not extended")
+            components.append("entry not extended:+5.00")
 
         if atr_pct > 6.0:
             rejections.append(f"volatility too high: ATR {atr_pct:.2f}%")
         elif atr_pct <= 4.0:
             bonus += 4
             reasons.append(f"controlled volatility ATR {atr_pct:.2f}%")
+            components.append("controlled volatility:+4.00")
 
         if return_20 > 0:
-            bonus += min(return_20, 12) * 0.5
+            return_bonus = min(return_20, 12) * 0.5
+            bonus += return_bonus
             reasons.append(f"positive 20-bar relative strength {return_20:.1f}%")
+            components.append(f"positive 20-bar relative strength:+{return_bonus:.2f}")
 
         if regime.breadth_score >= 60:
             bonus += 4
             reasons.append(f"breadth confirmation {regime.breadth_score:.0f}")
+            components.append("breadth confirmation:+4.00")
 
-        return SetupQuality(not rejections, bonus, reasons, rejections)
+        return SetupQuality(not rejections, bonus, reasons, rejections, components)
 
     def _breakout(self, ticker: str, close: float, previous_high: float, atr: float, volume_ratio: float, rsi: float, ema_9: float, ema_21: float) -> Optional[StrategySetup]:
         breakout_distance = (close - previous_high) / max(atr, 0.01)
@@ -357,19 +376,55 @@ class StrategyEngine:
         if breakout_distance > 1.75:
             return None
         score = 58 + min(breakout_distance * 12, 14) + min((volume_ratio - 1) * 12, 16)
-        return self._long_setup(ticker, "high-quality breakout", close, atr, score, f"controlled breakout above 20-bar high {previous_high:.2f}, RSI {rsi:.1f}")
+        return self._long_setup(
+            ticker,
+            "high-quality breakout",
+            close,
+            atr,
+            score,
+            f"controlled breakout above 20-bar high {previous_high:.2f}, RSI {rsi:.1f}",
+            scoring_components=(
+                "breakout base:+58.00",
+                f"breakout distance bonus:+{min(breakout_distance * 12, 14):.2f}",
+                f"volume expansion bonus:+{min((volume_ratio - 1) * 12, 16):.2f}",
+            ),
+        )
 
     def _reversal(self, ticker: str, close: float, previous_low: float, atr: float, volume_ratio: float, rsi: float, ema_50: float, ema_200: float) -> Optional[StrategySetup]:
         if close > previous_low + (atr * 0.85) or rsi > 45 or volume_ratio < 1.05 or close < ema_200 or ema_50 < ema_200:
             return None
         score = 54 + min((45 - rsi), 16) + min((volume_ratio - 1) * 10, 12)
-        return self._long_setup(ticker, "bull-market reversal", close, atr, score, f"oversold reversal within bull structure near {previous_low:.2f}, RSI {rsi:.1f}")
+        return self._long_setup(
+            ticker,
+            "bull-market reversal",
+            close,
+            atr,
+            score,
+            f"oversold reversal within bull structure near {previous_low:.2f}, RSI {rsi:.1f}",
+            scoring_components=(
+                "reversal base:+54.00",
+                f"RSI reversal bonus:+{min((45 - rsi), 16):.2f}",
+                f"volume support bonus:+{min((volume_ratio - 1) * 10, 12):.2f}",
+            ),
+        )
 
     def _momentum(self, ticker: str, close: float, atr: float, volume_ratio: float, ema_9: float, ema_21: float, ema_50: float, ema_200: float, macd: float, macd_signal: float, rsi: float) -> Optional[StrategySetup]:
         if not (ema_9 > ema_21 > ema_50 >= ema_200 and macd > macd_signal and 48 <= rsi <= 72 and volume_ratio >= 1.0):
             return None
         score = 56 + min((ema_9 - ema_21) / max(close, 0.01) * 1200, 18) + min((volume_ratio - 1) * 12, 14)
-        return self._long_setup(ticker, "institutional momentum continuation", close, atr, score, f"stacked EMA/MACD momentum, RSI {rsi:.1f}")
+        return self._long_setup(
+            ticker,
+            "institutional momentum continuation",
+            close,
+            atr,
+            score,
+            f"stacked EMA/MACD momentum, RSI {rsi:.1f}",
+            scoring_components=(
+                "momentum base:+56.00",
+                f"EMA momentum spread bonus:+{min((ema_9 - ema_21) / max(close, 0.01) * 1200, 18):.2f}",
+                f"volume momentum bonus:+{min((volume_ratio - 1) * 12, 14):.2f}",
+            ),
+        )
 
     @staticmethod
     def _long_setup(
@@ -381,6 +436,7 @@ class StrategyEngine:
         reason: str,
         signal_tier: str = "A Signal",
         confirmations: tuple[str, ...] = (),
+        scoring_components: tuple[str, ...] = (),
     ) -> StrategySetup:
         risk = max(atr, close * 0.01)
         return StrategySetup(
@@ -396,4 +452,5 @@ class StrategyEngine:
             do_not_enter_conditions=[],
             signal_tier=signal_tier,
             confirmations=confirmations,
+            scoring_components=scoring_components,
         )

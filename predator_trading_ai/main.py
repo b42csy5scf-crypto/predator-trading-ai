@@ -18,6 +18,7 @@ from predator_trading_ai.engines.alert_policy import AlertPolicy
 from predator_trading_ai.engines.regime_detector import MarketRegime, RegimeDetector
 from predator_trading_ai.engines.risk_engine import RiskEngine
 from predator_trading_ai.engines.shadow_mode import ShadowModeLogger
+from predator_trading_ai.engines.signal_diagnostics import SignalDiagnosticsRecorder
 from predator_trading_ai.engines.signal_engine import SignalEngine
 from predator_trading_ai.engines.strategy_engine import StrategyEngine, StrategySetup
 from predator_trading_ai.reports.report_runner import PerformanceReportRunner
@@ -50,8 +51,9 @@ class PredatorTradingAI:
         self.strategy_engine = StrategyEngine(self.settings)
         self.risk_engine = RiskEngine(self.settings)
         self.signal_engine = SignalEngine(self.db)
+        self.signal_diagnostics = SignalDiagnosticsRecorder(self.db)
         self.alert_policy = AlertPolicy(self.settings, self.db)
-        self.active_signal_tracker = ActiveSignalTracker(self.db, self.settings)
+        self.active_signal_tracker = ActiveSignalTracker(self.db, self.settings, self.signal_diagnostics)
         self.performance_report_runner: Optional[PerformanceReportRunner] = None
         self.tp_sl_monitor_started = False
         self.shadow_logger = ShadowModeLogger(self.db)
@@ -74,6 +76,7 @@ class PredatorTradingAI:
 
     def run(self, run_once: bool = False) -> None:
         self.db.initialize()
+        self.signal_diagnostics.cleanup(retention_days=30)
         self.logger.info("Predator Trading AI started. Live trading enabled: %s", self.settings.live_trading)
         self.logger.info("Runtime revision: %s", self.runtime_revision())
         self.logger.info(
@@ -217,6 +220,8 @@ class PredatorTradingAI:
     def process_ticker(self, ticker: str) -> None:
         self.logger.info("Processing %s.", ticker)
         diagnostic = self.new_candidate_diagnostic(ticker)
+        bars = None
+        regime = None
         try:
             bars = self.retry.run(
                 f"market bars {ticker}",
@@ -275,6 +280,7 @@ class PredatorTradingAI:
 
             diagnostic["score"] = setup.score
             diagnostic["grade"] = setup.signal_tier
+            diagnostic["conditions_passed"].extend(setup.confirmations)
             if self.active_signal_tracker.has_active_signal(ticker):
                 self.add_rejection(diagnostic, "Already active signal")
 
@@ -399,6 +405,15 @@ class PredatorTradingAI:
                 signal_id,
                 self.active_signal_tracker.active_count(),
             )
+            self.signal_diagnostics.record_accepted_signal(
+                signal_id=self.signal_engine.last_signal_id,
+                active_signal_id=signal_id,
+                setup=setup,
+                signal=signal,
+                bars=bars,
+                regime=regime,
+                telegram_note=SignalEngine.short_note(signal.reason, observe_only=False),
+            )
             self.state.last_telegram_alert = alert_key
             self.state_store.set_cooldown(self.state, alert_key)
             asyncio.run(self.telegram_bot.send_message(message))
@@ -406,6 +421,7 @@ class PredatorTradingAI:
             self.record_signal_generated()
         finally:
             self.log_candidate_diagnostic(diagnostic)
+            self.persist_candidate_diagnostic(diagnostic, bars, regime)
 
     @staticmethod
     def new_candidate_diagnostic(ticker: str) -> dict:
@@ -415,12 +431,18 @@ class PredatorTradingAI:
             "grade": "unknown",
             "passed": False,
             "rejections": [],
+            "first_rejection_gate": None,
+            "conditions_passed": [],
+            "conditions_failed": [],
         }
 
     @staticmethod
     def add_rejection(diagnostic: dict, reason: str) -> None:
         if reason and reason not in diagnostic["rejections"]:
             diagnostic["rejections"].append(reason)
+            diagnostic["conditions_failed"].append(reason)
+        if reason and diagnostic.get("first_rejection_gate") is None:
+            diagnostic["first_rejection_gate"] = reason
 
     @staticmethod
     def update_diagnostic_from_watch(diagnostic: dict, watch_evaluation) -> None:
@@ -428,6 +450,8 @@ class PredatorTradingAI:
             return
         diagnostic["score"] = watch_evaluation.score
         diagnostic["grade"] = watch_evaluation.grade_candidate
+        if watch_evaluation.setup is not None:
+            diagnostic["conditions_passed"].extend(watch_evaluation.setup.confirmations)
 
     def add_strategy_rejections(self, diagnostic: dict, watch_evaluation) -> None:
         if watch_evaluation is None:
@@ -473,6 +497,33 @@ class PredatorTradingAI:
             header,
             "\n".join(f"- {reason}" for reason in reasons),
         )
+
+    def persist_candidate_diagnostic(self, diagnostic: dict, bars, regime: Optional[MarketRegime]) -> None:
+        if diagnostic.get("passed"):
+            return
+        score = diagnostic.get("score")
+        if score is None:
+            return
+        try:
+            final_score = float(score)
+        except (TypeError, ValueError):
+            return
+        if final_score < 50:
+            return
+        try:
+            self.signal_diagnostics.record_rejected_candidate(
+                ticker=diagnostic["ticker"],
+                final_score=final_score,
+                computed_grade=diagnostic.get("grade") or "unknown",
+                first_rejection_gate=diagnostic.get("first_rejection_gate"),
+                rejection_reasons=list(dict.fromkeys(diagnostic.get("rejections", []))),
+                conditions_passed=list(dict.fromkeys(diagnostic.get("conditions_passed", []))),
+                conditions_failed=list(dict.fromkeys(diagnostic.get("conditions_failed", []))),
+                bars=bars,
+                regime=regime,
+            )
+        except Exception as exc:
+            self.logger.warning("Rejected candidate diagnostics persistence failed for %s: %s", diagnostic["ticker"], exc)
 
     def log_rejected_or_watch(
         self,

@@ -33,6 +33,7 @@ class TradingSignal:
 class SignalEngine:
     def __init__(self, db: Optional[Database] = None) -> None:
         self.db = db
+        self.last_signal_id: Optional[int] = None
 
     def build_signal(
         self,
@@ -65,7 +66,9 @@ class SignalEngine:
             gpt_explanation=explanation,
         )
         if self.db:
-            self.db.insert_dict("signals", asdict(signal))
+            self.last_signal_id = self.db.insert_dict("signals", asdict(signal))
+        else:
+            self.last_signal_id = None
         return signal
 
     @staticmethod

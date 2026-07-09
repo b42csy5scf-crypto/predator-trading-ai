@@ -6,6 +6,7 @@ from predator_trading_ai.config import Settings, get_settings
 from predator_trading_ai.database.db import Database
 from predator_trading_ai.engines.signal_engine import TradingSignal
 from predator_trading_ai.engines.strategy_engine import StrategySetup
+from predator_trading_ai.engines.signal_diagnostics import SignalDiagnosticsRecorder
 from predator_trading_ai.utils.logger import setup_logger
 
 
@@ -20,9 +21,15 @@ class SignalUpdate:
 
 
 class ActiveSignalTracker:
-    def __init__(self, db: Database, settings: Optional[Settings] = None) -> None:
+    def __init__(
+        self,
+        db: Database,
+        settings: Optional[Settings] = None,
+        diagnostics: Optional[SignalDiagnosticsRecorder] = None,
+    ) -> None:
         self.db = db
         self.settings = settings or get_settings()
+        self.diagnostics = diagnostics
         self.logger = setup_logger(__name__, self.settings.log_level)
 
     def register_trading_signal(self, signal: TradingSignal, grade: str) -> int:
@@ -145,6 +152,7 @@ class ActiveSignalTracker:
 
     def _evaluate_row(self, row, current_price: float) -> list[SignalUpdate]:
         signal_id = int(row["id"])
+        self._update_diagnostics(signal_id, current_price)
         direction = row["direction"]
         entry = self._entry_price(row)
         breakeven_active = int(row["breakeven_active"] or 0) == 1
@@ -161,12 +169,14 @@ class ActiveSignalTracker:
             update = self._create_update(row, "breakeven", current_price, "closed")
             self._close(signal_id, current_price, "breakeven_after_tp1")
             self._record_completed_trade(row, "BE", "closed", current_price, "breakeven_after_tp1")
+            self._update_diagnostics(signal_id, current_price, "breakeven", "BE", "breakeven_after_tp1")
             return [update] if update else []
 
         if stop_hit:
             update = self._create_update(row, "stop_loss", current_price, "closed")
             self._close(signal_id, current_price, "invalidated")
             self._record_completed_trade(row, "SL", "closed", current_price, "stop_loss")
+            self._update_diagnostics(signal_id, current_price, "stop_loss", "SL", "stop_loss")
             return [update] if update else []
 
         updates = []
@@ -183,6 +193,9 @@ class ActiveSignalTracker:
                 [current_price, signal_id],
             )
             self._record_completed_trade(row, f"TP{number}", status, current_price)
+            final_outcome = f"TP{number}" if number == 3 else None
+            exit_reason = "tp3_completed" if number == 3 else None
+            self._update_diagnostics(signal_id, current_price, f"tp{number}", final_outcome, exit_reason)
             if number == 1 and self.settings.move_stop_to_breakeven_after_tp1:
                 self._move_stop_to_breakeven(row, current_price)
         if any(update.update_type == "tp3" for update in updates):
@@ -193,6 +206,24 @@ class ActiveSignalTracker:
                 [current_price, signal_id],
             )
         return updates
+
+    def _update_diagnostics(
+        self,
+        active_signal_id: int,
+        current_price: float,
+        event: Optional[str] = None,
+        final_outcome: Optional[str] = None,
+        exit_reason: Optional[str] = None,
+    ) -> None:
+        if self.diagnostics is None:
+            return
+        self.diagnostics.update_outcome(
+            active_signal_id=active_signal_id,
+            current_price=current_price,
+            event=event,
+            final_outcome=final_outcome,
+            exit_reason=exit_reason,
+        )
 
     def _create_update(self, row, update_type: str, price: float, status: str) -> Optional[SignalUpdate]:
         signal_id = int(row["id"])

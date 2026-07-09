@@ -58,6 +58,20 @@ class Database:
             values,
         )
 
+    def cleanup_signal_diagnostics(self, retention_days: int = 30) -> None:
+        self.execute(
+            "DELETE FROM signal_diagnostics WHERE created_at < datetime('now', ?)",
+            [f"-{retention_days} days"],
+        )
+        self.execute(
+            "DELETE FROM rejected_candidate_diagnostics WHERE created_at < datetime('now', ?)",
+            [f"-{retention_days} days"],
+        )
+        self.execute(
+            "DELETE FROM signal_outcome_diagnostics WHERE updated_at < datetime('now', ?)",
+            [f"-{retention_days} days"],
+        )
+
     def set_state(self, key: str, value: Any) -> None:
         self.execute(
             """

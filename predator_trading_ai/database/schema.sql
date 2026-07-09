@@ -292,3 +292,84 @@ CREATE TABLE IF NOT EXISTS completed_trades (
 
 CREATE INDEX IF NOT EXISTS idx_completed_trades_ticker_status
 ON completed_trades(ticker, status);
+
+CREATE TABLE IF NOT EXISTS signal_diagnostics (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    signal_id INTEGER,
+    active_signal_id INTEGER,
+    ticker TEXT NOT NULL,
+    grade TEXT NOT NULL,
+    score REAL NOT NULL,
+    entry_zone_low REAL NOT NULL,
+    entry_zone_high REAL NOT NULL,
+    stop_loss REAL NOT NULL,
+    tp1 REAL NOT NULL,
+    tp2 REAL NOT NULL,
+    tp3 REAL NOT NULL,
+    atr REAL,
+    stop_distance_pct REAL,
+    stop_distance_atr REAL,
+    breakout_distance_atr REAL,
+    distance_from_ema21_atr REAL,
+    distance_from_ema50_atr REAL,
+    relative_volume REAL,
+    rsi REAL,
+    macd_minus_signal REAL,
+    spy_trend TEXT,
+    qqq_trend TEXT,
+    regime TEXT,
+    breadth_score REAL,
+    sector TEXT,
+    telegram_note TEXT,
+    scoring_components_json TEXT NOT NULL,
+    raw_metrics_json TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_signal_diagnostics_created_at
+ON signal_diagnostics(created_at);
+
+CREATE TABLE IF NOT EXISTS rejected_candidate_diagnostics (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    ticker TEXT NOT NULL,
+    final_score REAL NOT NULL,
+    computed_grade TEXT NOT NULL,
+    first_rejection_gate TEXT,
+    rejection_reasons_json TEXT NOT NULL,
+    conditions_passed_json TEXT NOT NULL,
+    conditions_failed_json TEXT NOT NULL,
+    why_not_trade TEXT NOT NULL,
+    raw_metrics_json TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_rejected_candidate_diagnostics_created_at
+ON rejected_candidate_diagnostics(created_at);
+
+CREATE TABLE IF NOT EXISTS signal_outcome_diagnostics (
+    active_signal_id INTEGER PRIMARY KEY,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    ticker TEXT NOT NULL,
+    grade TEXT NOT NULL,
+    direction TEXT NOT NULL DEFAULT 'long',
+    entry_price REAL NOT NULL,
+    original_stop_loss REAL NOT NULL,
+    risk_per_share REAL NOT NULL,
+    max_favorable_price REAL,
+    max_adverse_price REAL,
+    mfe_r REAL NOT NULL DEFAULT 0,
+    mae_r REAL NOT NULL DEFAULT 0,
+    current_r REAL NOT NULL DEFAULT 0,
+    tp1_hit_at TEXT,
+    tp2_hit_at TEXT,
+    tp3_hit_at TEXT,
+    sl_hit_at TEXT,
+    holding_seconds REAL,
+    final_outcome TEXT,
+    exit_reason TEXT,
+    FOREIGN KEY(active_signal_id) REFERENCES active_signals(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_signal_outcome_diagnostics_updated_at
+ON signal_outcome_diagnostics(updated_at);
