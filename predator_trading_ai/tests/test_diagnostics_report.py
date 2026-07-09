@@ -137,8 +137,13 @@ def test_diagnostics_report_separates_trade_candidates_and_strong_b(tmp_path) ->
     assert "Accepted A/A+/A++ signals: 1" in report
     assert "Strong B Experimental Watch signals: 1" in report
     assert "Sample size is small; do not change strategy yet." in report
-    assert "Trade Candidate Performance" in report
+    assert "Trade Candidates Summary" in report
     assert "Win rate: 100.0%" in report
+    assert "By Grade Performance" in report
+    assert "A++ Signal" in report
+    assert "A+ Signal" in report
+    assert "A Signal" in report
+    assert "A++ Only" not in report
     assert "Strong B Experimental Watch\nTotal: 1" in report
     assert "Candidates rejected with score >= 50: 1" in report
     assert "- Grade below A: 1" in report

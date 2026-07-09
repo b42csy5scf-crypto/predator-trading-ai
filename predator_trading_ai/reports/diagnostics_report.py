@@ -9,6 +9,7 @@ from predator_trading_ai.database.db import Database
 
 
 TRADE_GRADES = {"A++ Signal", "A+ Signal", "A Signal"}
+TRADE_GRADE_ORDER = ("A++ Signal", "A+ Signal", "A Signal")
 
 
 @dataclass(frozen=True)
@@ -48,16 +49,15 @@ class DiagnosticsReport:
             for item in outcomes
             if item.alert_type == "experimental_watch" and item.grade == "B Watch Alert"
         ]
-        a_plus_plus = [item for item in trade_outcomes if item.grade == "A++ Signal"]
         closed_trade_candidates = [item for item in trade_outcomes if item.status == "closed"]
 
         sections = [
             "Predator Diagnostics Report",
             "",
             self._section("Data Coverage", self.data_coverage(accepted, outcomes, rejected, closed_trade_candidates)),
-            self._section("Trade Candidate Performance", self.metric_block(trade_outcomes)),
+            self._section("Trade Candidates Summary", self.metric_block(trade_outcomes)),
+            self._section("By Grade Performance", self.by_grade_performance(trade_outcomes)),
             self._section("Strong B Experimental Watch", self.metric_block(strong_b)),
-            self._section("A++ Only", self.metric_block(a_plus_plus, include_final_r=False, include_holding=False)),
             self._section("Rejection Analytics", self.rejection_analytics(rejected)),
             self._section("Outcome Behavior", self.outcome_behavior(trade_outcomes, strong_b)),
             self._section("Best / Worst Tickers", self.ticker_extremes(outcomes)),
@@ -177,6 +177,34 @@ class DiagnosticsReport:
         if not closed:
             lines.append("Closed sample: 0")
         return lines
+
+    def by_grade_performance(self, rows: list[DiagnosticOutcome]) -> list[str]:
+        lines = [self.grade_header()]
+        for grade in TRADE_GRADE_ORDER:
+            grade_rows = [item for item in rows if item.grade == grade]
+            lines.append(self.grade_metric_line(grade, grade_rows))
+        return lines
+
+    def grade_metric_line(self, label: str, rows: list[DiagnosticOutcome]) -> str:
+        wins = len([item for item in rows if self.is_win(item)])
+        losses = len([item for item in rows if item.final_outcome == "SL"])
+        breakeven = len([item for item in rows if item.final_outcome == "BE"])
+        return (
+            f"{label:<10} "
+            f"{len(rows):>3} "
+            f"{wins:>2} "
+            f"{losses:>2} "
+            f"{breakeven:>2} "
+            f"{self.win_rate(rows):>5.1f}% "
+            f"{self.avg([item.mfe_r for item in rows]):>5.2f} "
+            f"{self.avg([item.mae_r for item in rows]):>5.2f} "
+            f"{self.avg([item.current_r for item in rows if item.status == 'closed']):>5.2f} "
+            f"{self.format_seconds(self.avg_holding(rows)):>8}"
+        )
+
+    @staticmethod
+    def grade_header() -> str:
+        return "Grade      Tot  W  L BE   Win%   MFE   MAE  FinalR  Hold"
 
     def rejection_analytics(self, rejected: list[Any]) -> list[str]:
         first_gates = Counter(str(row["first_rejection_gate"] or "unknown") for row in rejected)
