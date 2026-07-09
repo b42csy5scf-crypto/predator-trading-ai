@@ -31,6 +31,10 @@ class Database:
         self._add_column_if_missing(conn, "active_signals", "original_stop_loss", "REAL")
         self._add_column_if_missing(conn, "active_signals", "breakeven_active", "INTEGER NOT NULL DEFAULT 0")
         self._add_column_if_missing(conn, "active_signals", "breakeven_price", "REAL")
+        self._add_column_if_missing(conn, "active_signals", "alert_type", "TEXT NOT NULL DEFAULT 'trade_candidate'")
+        self._add_column_if_missing(conn, "completed_trades", "alert_type", "TEXT NOT NULL DEFAULT 'trade_candidate'")
+        self._add_column_if_missing(conn, "signal_diagnostics", "alert_type", "TEXT NOT NULL DEFAULT 'trade_candidate'")
+        self._add_column_if_missing(conn, "signal_outcome_diagnostics", "alert_type", "TEXT NOT NULL DEFAULT 'trade_candidate'")
 
     @staticmethod
     def _add_column_if_missing(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:

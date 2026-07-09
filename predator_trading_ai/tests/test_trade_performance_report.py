@@ -22,6 +22,7 @@ def insert_active(
     regime: str,
     close_reason: str,
     message: str,
+    alert_type: str = "trade_candidate",
 ) -> None:
     sent_at = "2026-06-18T14:30:00+00:00"
     db.insert_dict(
@@ -29,7 +30,7 @@ def insert_active(
         {
             "ticker": ticker,
             "grade": grade,
-            "alert_type": "trade_candidate",
+            "alert_type": alert_type,
             "score": score,
             "setup_type": "test",
             "regime": regime,
@@ -41,6 +42,7 @@ def insert_active(
         {
             "ticker": ticker,
             "grade": grade,
+            "alert_type": alert_type,
             "direction": "long",
             "entry_zone_low": 100.0,
             "entry_zone_high": 101.0,
@@ -61,7 +63,16 @@ def insert_active(
 def test_trade_performance_report_breakdowns_and_recommendations(tmp_path) -> None:
     db = make_db(tmp_path)
     insert_active(db, "NVDA", "A+ Signal", 70, "bull-trend", "tp3_completed", "Note: strong momentum")
-    insert_active(db, "PLD", "B Watch Alert", 53, "choppy", "invalidated", "Note: Volume not confirmed")
+    insert_active(
+        db,
+        "PLD",
+        "B Watch Alert",
+        58,
+        "choppy",
+        "invalidated",
+        "Note: Volume not confirmed",
+        alert_type="experimental_watch",
+    )
     db.insert_dict(
         "shadow_signals",
         {
@@ -99,10 +110,11 @@ def test_trade_performance_report_breakdowns_and_recommendations(tmp_path) -> No
     assert "Best grade: A+ Signal" in report
     assert "Worst grade: B Watch Alert" in report
     assert "By Grade" in report
+    assert "Strong B Experimental Watch" in report
     assert "A+ Signal" in report
     assert "B Watch Alert" in report
     assert "65-75" in report
-    assert "50-55" in report
+    assert "55-60" in report
     assert "Bull" in report
     assert "Choppy" in report
     assert "NVDA" in report
@@ -142,6 +154,28 @@ def test_report_reads_completed_trades_table_directly(tmp_path) -> None:
     report = TradePerformanceReport(db).build()
     assert "Total completed trades: 1" in report
     assert "A++ Signal" in report
+
+
+def test_strong_b_does_not_affect_trade_candidate_win_rate(tmp_path) -> None:
+    db = make_db(tmp_path)
+    insert_active(db, "NVDA", "A+ Signal", 70, "bull-trend", "tp3_completed", "Note: strong momentum")
+    insert_active(
+        db,
+        "PLD",
+        "B Watch Alert",
+        58,
+        "normal",
+        "invalidated",
+        "Note: Strong B experimental watch",
+        alert_type="experimental_watch",
+    )
+
+    report = TradePerformanceReport(db).build()
+
+    assert "Trade Candidates (A/A+/A++)\nGroup" in report
+    assert "Total                  1     1       0   100.0%" in report
+    assert "Strong B Experimental Watch\nGroup" in report
+    assert "Total                  1     0       1     0.0%" in report
 
 
 def test_report_runner_sends_without_starting_polling(tmp_path, monkeypatch) -> None:

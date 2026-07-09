@@ -30,8 +30,31 @@ class SignalDiagnosticsRecorder:
         bars: pd.DataFrame,
         regime: MarketRegime,
         telegram_note: str,
+        alert_type: str = "trade_candidate",
     ) -> None:
-        if setup.signal_tier not in self.TRADE_GRADES:
+        self.record_accepted_setup(
+            signal_id=signal_id,
+            active_signal_id=active_signal_id,
+            setup=setup,
+            bars=bars,
+            regime=regime,
+            telegram_note=telegram_note,
+            alert_type=alert_type,
+        )
+        self.initialize_outcome_from_signal(active_signal_id, signal, setup.signal_tier, alert_type)
+
+    def record_accepted_setup(
+        self,
+        *,
+        signal_id: Optional[int],
+        active_signal_id: int,
+        setup: StrategySetup,
+        bars: pd.DataFrame,
+        regime: MarketRegime,
+        telegram_note: str,
+        alert_type: str,
+    ) -> None:
+        if setup.signal_tier not in self.TRADE_GRADES and alert_type != "experimental_watch":
             return
         metrics = self.market_metrics(bars, setup, regime)
         self.db.insert_dict(
@@ -41,13 +64,14 @@ class SignalDiagnosticsRecorder:
                 "active_signal_id": active_signal_id,
                 "ticker": setup.ticker,
                 "grade": setup.signal_tier,
+                "alert_type": alert_type,
                 "score": setup.score,
                 "entry_zone_low": setup.entry_zone_low,
                 "entry_zone_high": setup.entry_zone_high,
                 "stop_loss": setup.stop_loss,
-                "tp1": signal.target_1,
-                "tp2": signal.target_2,
-                "tp3": signal.target_3,
+                "tp1": setup.targets[0],
+                "tp2": setup.targets[1],
+                "tp3": setup.targets[2],
                 "atr": metrics["atr"],
                 "stop_distance_pct": metrics["stop_distance_pct"],
                 "stop_distance_atr": metrics["stop_distance_atr"],
@@ -67,7 +91,9 @@ class SignalDiagnosticsRecorder:
                 "raw_metrics_json": metrics,
             },
         )
-        self.initialize_outcome_from_signal(active_signal_id, signal, setup.signal_tier)
+        active_rows = self.db.fetch_all("SELECT * FROM active_signals WHERE id = ?", [active_signal_id])
+        if active_rows:
+            self.initialize_outcome_from_active_row(active_rows[0])
 
     def record_rejected_candidate(
         self,
@@ -107,23 +133,30 @@ class SignalDiagnosticsRecorder:
             },
         )
 
-    def initialize_outcome_from_signal(self, active_signal_id: int, signal: TradingSignal, grade: str) -> None:
+    def initialize_outcome_from_signal(
+        self,
+        active_signal_id: int,
+        signal: TradingSignal,
+        grade: str,
+        alert_type: str = "trade_candidate",
+    ) -> None:
         entry = (signal.entry_zone_low + signal.entry_zone_high) / 2
         risk = max(abs(entry - signal.stop_loss), 0.01)
         self.db.execute(
             """
             INSERT INTO signal_outcome_diagnostics (
-                active_signal_id, ticker, grade, direction, entry_price,
+                active_signal_id, ticker, grade, alert_type, direction, entry_price,
                 original_stop_loss, risk_per_share, max_favorable_price,
                 max_adverse_price
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(active_signal_id) DO NOTHING
             """,
             [
                 active_signal_id,
                 signal.ticker,
                 grade,
+                alert_type,
                 signal.direction,
                 entry,
                 signal.stop_loss,
@@ -206,17 +239,18 @@ class SignalDiagnosticsRecorder:
         self.db.execute(
             """
             INSERT INTO signal_outcome_diagnostics (
-                active_signal_id, ticker, grade, direction, entry_price,
+                active_signal_id, ticker, grade, alert_type, direction, entry_price,
                 original_stop_loss, risk_per_share, max_favorable_price,
                 max_adverse_price
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(active_signal_id) DO NOTHING
             """,
             [
                 int(row["id"]),
                 row["ticker"],
                 row["grade"],
+                row["alert_type"] if "alert_type" in row.keys() else "trade_candidate",
                 row["direction"],
                 entry,
                 original_stop,

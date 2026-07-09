@@ -549,14 +549,14 @@ class PredatorTradingAI:
         if watch is not None:
             diagnostics = self.shadow_logger.diagnostics(ticker, bars, {**self.state.active_positions, **self.state.active_signals}, score=watch.score)
             self.shadow_logger.log(ticker, "watch_alert", regime, diagnostics, setup=watch)
-            self.send_watch_alert(ticker, watch, regime)
+            self.send_watch_alert(ticker, watch, regime, bars=bars)
             return watch_evaluation
         if watch_evaluation is not None:
             reason = f"{reason}; candidate_score={watch_evaluation.score:.0f}; grade_candidate={watch_evaluation.grade_candidate}; {watch_evaluation.reason}"
         self.shadow_logger.log(ticker, "rejected", regime, diagnostics, rejection_stage=stage, rejection_reason=reason)
         return watch_evaluation
 
-    def send_watch_alert(self, ticker: str, setup: StrategySetup, regime: MarketRegime) -> None:
+    def send_watch_alert(self, ticker: str, setup: StrategySetup, regime: MarketRegime, bars=None) -> None:
         if not self.settings.enable_watchlist_alerts:
             self.record_signal_suppressed("watchlist alerts disabled")
             return
@@ -588,19 +588,64 @@ class PredatorTradingAI:
                 alert_decision.reason,
             )
             return
+        is_strong_b = setup.signal_tier == "B Watch Alert" and self.is_strong_b_experimental_watch(
+            setup,
+            regime,
+            alert_decision,
+        )
+        if setup.signal_tier == "B Watch Alert" and not is_strong_b:
+            reason = "B suppressed: did not meet Strong B experimental tracking requirements"
+            self.record_signal_suppressed(reason)
+            self.logger.info(
+                "Telegram watch alert suppressed for %s grade=%s score=%.0f: %s",
+                ticker,
+                setup.signal_tier,
+                setup.score,
+                reason,
+            )
+            return
         alert_key = self.alert_cooldown_key(ticker, setup.signal_tier)
         if self.state_store.is_on_cooldown(self.state, alert_key, self.alert_cooldown_seconds):
             self.record_signal_suppressed("duplicate cooldown")
             return
         message = SignalEngine.format_watch_alert(setup, bear_regime=self.is_bear_watch_regime(regime))
-        self.log_sent_alert(ticker, setup.signal_tier, "observe_only", setup.score, setup.setup_type, regime.regime, message)
+        alert_type = "experimental_watch" if is_strong_b else "observe_only"
+        if is_strong_b:
+            message = message.replace("Predator Signal: B Watch Alert", "Predator Signal: Strong B Watch — experimental tracking")
+        self.log_sent_alert(ticker, setup.signal_tier, alert_type, setup.score, setup.setup_type, regime.regime, message)
         self.alert_policy.record(ticker, setup.signal_tier)
-        if self.settings.enable_b_tp_sl_tracking and setup.signal_tier == "B Watch Alert":
-            self.active_signal_tracker.register_watch_signal(setup)
+        if is_strong_b:
+            active_signal_id = self.active_signal_tracker.register_watch_signal(setup)
+            if bars is not None and not bars.empty:
+                self.signal_diagnostics.record_accepted_setup(
+                    signal_id=None,
+                    active_signal_id=active_signal_id,
+                    setup=setup,
+                    bars=bars,
+                    regime=regime,
+                    telegram_note=SignalEngine.short_note(setup.reason, observe_only=True, bear_regime=self.is_bear_watch_regime(regime)),
+                    alert_type="experimental_watch",
+                )
         self.state.last_telegram_alert = alert_key
         self.state_store.set_cooldown(self.state, alert_key)
         asyncio.run(self.telegram_bot.send_message(message))
         self.record_signal_generated()
+
+    def is_strong_b_experimental_watch(self, setup: StrategySetup, regime: MarketRegime, decision) -> bool:
+        if setup.signal_tier != "B Watch Alert" or not decision.allowed:
+            return False
+        confirmations = set(setup.confirmations)
+        has_relative_volume = any(item.startswith("relative volume >=") for item in confirmations)
+        return (
+            setup.score >= self.alert_policy.effective_min_score_b()
+            and len(confirmations) >= self.settings.b_min_confirmations
+            and self.alert_policy.market_healthy_for_b(regime)
+            and has_relative_volume
+            and confirmations != {"price above EMA50"}
+            and not self.alert_policy._reason_only_price_above_ema50(setup.reason)
+            and regime.regime not in {"panic", "high-volatility"}
+            and regime.regime_severity not in {"severe", "panic"}
+        )
 
     def log_b_alert_policy_decision(self, ticker: str, setup: StrategySetup, regime: MarketRegime, decision) -> None:
         confirmations = tuple(setup.confirmations)

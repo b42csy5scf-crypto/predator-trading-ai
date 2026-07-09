@@ -36,6 +36,7 @@ class ActiveSignalTracker:
         return self.register(
             ticker=signal.ticker,
             grade=grade,
+            alert_type="trade_candidate",
             direction=signal.direction,
             entry_zone_low=signal.entry_zone_low,
             entry_zone_high=signal.entry_zone_high,
@@ -47,6 +48,7 @@ class ActiveSignalTracker:
         return self.register(
             ticker=setup.ticker,
             grade=setup.signal_tier,
+            alert_type="experimental_watch",
             direction=setup.direction,
             entry_zone_low=setup.entry_zone_low,
             entry_zone_high=setup.entry_zone_high,
@@ -63,6 +65,7 @@ class ActiveSignalTracker:
         entry_zone_high: float,
         stop_loss: float,
         targets: tuple[float, float, float],
+        alert_type: str = "trade_candidate",
         sent_at: Optional[datetime] = None,
     ) -> int:
         timestamp = (sent_at or datetime.now(timezone.utc)).isoformat()
@@ -90,6 +93,7 @@ class ActiveSignalTracker:
             {
                 "ticker": ticker,
                 "grade": grade,
+                "alert_type": alert_type,
                 "direction": direction,
                 "entry_zone_low": entry_zone_low,
                 "entry_zone_high": entry_zone_high,
@@ -327,14 +331,15 @@ class ActiveSignalTracker:
         self.db.execute(
             f"""
             INSERT INTO completed_trades (
-                active_signal_id, ticker, grade, direction,
+                active_signal_id, ticker, grade, alert_type, direction,
                 entry_zone_low, entry_zone_high, entry_price, stop_loss,
                 tp1, tp2, tp3, outcome, status, opened_at, closed_at,
                 close_price, r_multiple, regime, score, stop_loss_reason
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, {closed_at}, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, {closed_at}, ?, ?, ?, ?, ?)
             ON CONFLICT(active_signal_id) DO UPDATE SET
                 updated_at = CURRENT_TIMESTAMP,
+                alert_type = excluded.alert_type,
                 outcome = excluded.outcome,
                 status = excluded.status,
                 closed_at = CASE WHEN excluded.status = 'closed' THEN CURRENT_TIMESTAMP ELSE completed_trades.closed_at END,
@@ -348,6 +353,7 @@ class ActiveSignalTracker:
                 signal_id,
                 row["ticker"],
                 row["grade"],
+                row["alert_type"] if "alert_type" in row.keys() else "trade_candidate",
                 row["direction"],
                 float(row["entry_zone_low"]),
                 float(row["entry_zone_high"]),

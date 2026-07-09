@@ -30,6 +30,7 @@ LOSS_REASON_KEYWORDS = {
 class SignalOutcome:
     ticker: str
     grade: str
+    alert_type: str
     score: Optional[float]
     regime: str
     sector: str
@@ -49,14 +50,18 @@ class TradePerformanceReport:
         if not outcomes:
             return "Predator Trading AI Performance Analytics\nNo completed signal outcomes found yet."
 
-        trade_candidates = [item for item in outcomes if item.grade in {"A++ Signal", "A+ Signal", "A Signal"}]
-        watch_alerts = [item for item in outcomes if item.grade == "B Watch Alert"]
+        trade_candidates = [
+            item
+            for item in outcomes
+            if item.alert_type == "trade_candidate" and item.grade in {"A++ Signal", "A+ Signal", "A Signal"}
+        ]
+        strong_b_watch = [item for item in outcomes if item.alert_type == "experimental_watch" and item.grade == "B Watch Alert"]
         sections = [
             "Predator Trading AI Performance Analytics",
             "",
             self._section("Telegram Summary", self._telegram_summary(outcomes)),
             self._section("Trade Candidates (A/A+/A++)", self._metric_block(trade_candidates)),
-            self._section("Watch Alerts (B, Separate)", self._metric_block(watch_alerts)),
+            self._section("Strong B Experimental Watch", self._metric_block(strong_b_watch)),
             self._section("By Grade", self._metrics_by_grade(outcomes)),
             self._section("By Score Range", self._metrics_by_score(outcomes)),
             self._section("By Regime", self._metrics_by_regime(outcomes)),
@@ -90,6 +95,7 @@ class TradePerformanceReport:
                 SignalOutcome(
                     ticker=row["ticker"],
                     grade=row["grade"],
+                    alert_type=str(row["alert_type"] or "trade_candidate"),
                     score=float(row["score"]) if row["score"] is not None else None,
                     regime=str(row["regime"] or "unknown"),
                     sector=SECTOR_BY_TICKER.get(str(row["ticker"]).upper(), "Unknown"),
@@ -154,6 +160,7 @@ class TradePerformanceReport:
                     "active_signal_id": row["id"],
                     "ticker": row["ticker"],
                     "grade": row["grade"],
+                    "alert_type": alert["alert_type"] if alert else (row["alert_type"] if "alert_type" in row.keys() else "trade_candidate"),
                     "direction": row["direction"],
                     "entry_zone_low": row["entry_zone_low"],
                     "entry_zone_high": row["entry_zone_high"],
@@ -196,8 +203,8 @@ class TradePerformanceReport:
         common_stop = loss_reasons[0] if loss_reasons and loss_reasons[0] != "No losses recorded." else "n/a"
         return [
             f"Total completed trades: {total}",
-            f"Trade candidates: {len([item for item in outcomes if item.grade in {'A++ Signal', 'A+ Signal', 'A Signal'}])}",
-            f"Watch alerts: {len([item for item in outcomes if item.grade == 'B Watch Alert'])}",
+            f"Trade candidates: {len([item for item in outcomes if item.alert_type == 'trade_candidate' and item.grade in {'A++ Signal', 'A+ Signal', 'A Signal'}])}",
+            f"Strong B experimental watch: {len([item for item in outcomes if item.alert_type == 'experimental_watch' and item.grade == 'B Watch Alert'])}",
             f"Wins: {wins}",
             f"Losses: {losses}",
             f"Win rate: {win_rate:.1f}%",
