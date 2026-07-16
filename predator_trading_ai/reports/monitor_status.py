@@ -268,6 +268,8 @@ class MonitorStatusReport:
                 "- Healthy: YES",
                 "- Read test: OK",
                 f"- Backend/type: {self.database_backend()}",
+                f"- Persistent database: {self.persistent_database_label()}",
+                f"- Connection scope: {self.connection_scope_label()}",
                 f"- Last diagnostics write: {latest_diag or 'n/a'}",
                 f"- Last price_path write: {latest_path or 'n/a'}",
                 f"- Active signal rows: {self.scalar('SELECT COUNT(*) AS count FROM active_signals', default=0)}",
@@ -383,7 +385,24 @@ class MonitorStatusReport:
         return mapping.get(str(value), str(value).upper())
 
     def database_backend(self) -> str:
-        return "sqlite" if self.settings.database_url.startswith("sqlite") else "configured-db"
+        backend = getattr(self.db, "backend", None)
+        if backend:
+            return str(backend)
+        return "sqlite" if self.settings.database_url.startswith("sqlite") else "postgresql"
+
+    def persistent_database_label(self) -> str:
+        return "YES" if self.database_backend() == "postgresql" else "NO / LOCAL"
+
+    def connection_scope_label(self) -> str:
+        if self.database_backend() == "sqlite":
+            return "local"
+        value = str(self.settings.database_url)
+        lowered = value.lower()
+        if "railway.internal" in lowered or ".internal" in lowered:
+            return "Railway private network"
+        if value.startswith(("postgresql://", "postgres://")):
+            return "external"
+        return "unknown"
 
     def database_size_label(self) -> str:
         if not self.settings.database_url.startswith("sqlite:///"):

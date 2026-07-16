@@ -113,6 +113,9 @@ def test_monitor_status_fully_healthy_runtime(tmp_path) -> None:
     assert "TP/SL Monitor" in report
     assert "ActiveSignalTracker" in report
     assert "Research Dataset" in report
+    assert "Backend/type: sqlite" in report
+    assert "Persistent database: NO / LOCAL" in report
+    assert "Connection scope: local" in report
     assert "secret-token" not in report
     assert "secret-chat" not in report
 

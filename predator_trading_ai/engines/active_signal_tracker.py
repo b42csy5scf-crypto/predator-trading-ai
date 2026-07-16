@@ -130,7 +130,8 @@ class ActiveSignalTracker:
         )
         updates: list[SignalUpdate] = []
         for row in rows:
-            updates.extend(self._evaluate_row(row, current_price, high=high, low=low, timestamp=timestamp, exit_atr=exit_atr))
+            with self.db.transaction():
+                updates.extend(self._evaluate_row(row, current_price, high=high, low=low, timestamp=timestamp, exit_atr=exit_atr))
         return updates
 
     def active_tickers(self) -> list[str]:
