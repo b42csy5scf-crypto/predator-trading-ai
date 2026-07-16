@@ -325,6 +325,36 @@ CREATE TABLE IF NOT EXISTS signal_diagnostics (
     breadth_score REAL,
     sector TEXT,
     telegram_note TEXT,
+    git_commit_hash TEXT,
+    strategy_version TEXT,
+    schema_version TEXT,
+    research_dataset_version TEXT,
+    config_hash TEXT,
+    distance_from_ema21 REAL,
+    distance_from_ema50 REAL,
+    distance_from_recent_swing_low REAL,
+    stop_to_swing_low_distance REAL,
+    bars_since_breakout INTEGER,
+    entry_open REAL,
+    entry_high REAL,
+    entry_low REAL,
+    entry_close REAL,
+    entry_volume REAL,
+    previous_open REAL,
+    previous_high REAL,
+    previous_low REAL,
+    previous_close REAL,
+    previous_volume REAL,
+    spy_state TEXT,
+    qqq_state TEXT,
+    vix_value REAL,
+    spread_at_entry REAL,
+    slippage_proxy REAL,
+    gap_flag INTEGER,
+    minutes_after_market_open REAL,
+    day_of_week INTEGER,
+    open_positions_count INTEGER,
+    open_positions_same_sector INTEGER,
     scoring_components_json TEXT NOT NULL,
     raw_metrics_json TEXT NOT NULL
 );
@@ -343,6 +373,23 @@ CREATE TABLE IF NOT EXISTS rejected_candidate_diagnostics (
     conditions_passed_json TEXT NOT NULL,
     conditions_failed_json TEXT NOT NULL,
     why_not_trade TEXT NOT NULL,
+    breakout_distance_atr REAL,
+    distance_from_ema21 REAL,
+    distance_from_ema50 REAL,
+    distance_from_recent_swing_low REAL,
+    stop_to_swing_low_distance REAL,
+    bars_since_breakout INTEGER,
+    entry_open REAL,
+    entry_high REAL,
+    entry_low REAL,
+    entry_close REAL,
+    entry_volume REAL,
+    previous_open REAL,
+    previous_high REAL,
+    previous_low REAL,
+    previous_close REAL,
+    previous_volume REAL,
+    gap_flag INTEGER,
     raw_metrics_json TEXT NOT NULL
 );
 
@@ -369,11 +416,56 @@ CREATE TABLE IF NOT EXISTS signal_outcome_diagnostics (
     tp2_hit_at TEXT,
     tp3_hit_at TEXT,
     sl_hit_at TEXT,
+    time_to_mfe_seconds REAL,
+    time_to_mae_seconds REAL,
+    time_to_025r_seconds REAL,
+    time_to_050r_seconds REAL,
+    time_to_075r_seconds REAL,
+    time_to_100r_seconds REAL,
     holding_seconds REAL,
     final_outcome TEXT,
     exit_reason TEXT,
+    exit_price REAL,
+    exit_timestamp TEXT,
+    exit_atr REAL,
+    realized_r REAL,
     FOREIGN KEY(active_signal_id) REFERENCES active_signals(id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_signal_outcome_diagnostics_updated_at
 ON signal_outcome_diagnostics(updated_at);
+
+CREATE TABLE IF NOT EXISTS price_path (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    signal_id INTEGER NOT NULL,
+    timestamp TEXT NOT NULL,
+    price REAL NOT NULL,
+    high REAL,
+    low REAL,
+    event_type TEXT NOT NULL DEFAULT 'scan',
+    FOREIGN KEY(signal_id) REFERENCES active_signals(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_price_path_signal_time
+ON price_path(signal_id, timestamp);
+
+CREATE TABLE IF NOT EXISTS universe_snapshot (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    timestamp TEXT NOT NULL,
+    symbols_scanned INTEGER NOT NULL,
+    symbols_skipped INTEGER NOT NULL,
+    api_failures INTEGER NOT NULL,
+    missing_market_data INTEGER NOT NULL,
+    symbols_successfully_evaluated INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_universe_snapshot_timestamp
+ON universe_snapshot(timestamp);
+
+CREATE TABLE IF NOT EXISTS config_snapshots (
+    config_hash TEXT PRIMARY KEY,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    config_json TEXT NOT NULL
+);

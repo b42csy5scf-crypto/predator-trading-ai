@@ -115,14 +115,22 @@ class ActiveSignalTracker:
         )
         return signal_id
 
-    def check_ticker(self, ticker: str, current_price: float) -> list[SignalUpdate]:
+    def check_ticker(
+        self,
+        ticker: str,
+        current_price: float,
+        high: Optional[float] = None,
+        low: Optional[float] = None,
+        timestamp: Optional[str] = None,
+        exit_atr: Optional[float] = None,
+    ) -> list[SignalUpdate]:
         rows = self.db.fetch_all(
             "SELECT * FROM active_signals WHERE ticker = ? AND status = 'active' ORDER BY id",
             [ticker],
         )
         updates: list[SignalUpdate] = []
         for row in rows:
-            updates.extend(self._evaluate_row(row, current_price))
+            updates.extend(self._evaluate_row(row, current_price, high=high, low=low, timestamp=timestamp, exit_atr=exit_atr))
         return updates
 
     def active_tickers(self) -> list[str]:
@@ -154,9 +162,17 @@ class ActiveSignalTracker:
         )
         return bool(rows)
 
-    def _evaluate_row(self, row, current_price: float) -> list[SignalUpdate]:
+    def _evaluate_row(
+        self,
+        row,
+        current_price: float,
+        high: Optional[float] = None,
+        low: Optional[float] = None,
+        timestamp: Optional[str] = None,
+        exit_atr: Optional[float] = None,
+    ) -> list[SignalUpdate]:
         signal_id = int(row["id"])
-        self._update_diagnostics(signal_id, current_price)
+        self._update_diagnostics(signal_id, current_price, high=high, low=low, timestamp=timestamp)
         direction = row["direction"]
         entry = self._entry_price(row)
         breakeven_active = int(row["breakeven_active"] or 0) == 1
@@ -173,14 +189,14 @@ class ActiveSignalTracker:
             update = self._create_update(row, "breakeven", current_price, "closed")
             self._close(signal_id, current_price, "breakeven_after_tp1")
             self._record_completed_trade(row, "BE", "closed", current_price, "breakeven_after_tp1")
-            self._update_diagnostics(signal_id, current_price, "breakeven", "BE", "breakeven_after_tp1")
+            self._update_diagnostics(signal_id, current_price, "breakeven", "BE", "breakeven_after_tp1", high, low, timestamp, exit_atr)
             return [update] if update else []
 
         if stop_hit:
             update = self._create_update(row, "stop_loss", current_price, "closed")
             self._close(signal_id, current_price, "invalidated")
             self._record_completed_trade(row, "SL", "closed", current_price, "stop_loss")
-            self._update_diagnostics(signal_id, current_price, "stop_loss", "SL", "stop_loss")
+            self._update_diagnostics(signal_id, current_price, "stop_loss", "SL", "stop_loss", high, low, timestamp, exit_atr)
             return [update] if update else []
 
         updates = []
@@ -199,7 +215,7 @@ class ActiveSignalTracker:
             self._record_completed_trade(row, f"TP{number}", status, current_price)
             final_outcome = f"TP{number}" if number == 3 else None
             exit_reason = "tp3_completed" if number == 3 else None
-            self._update_diagnostics(signal_id, current_price, f"tp{number}", final_outcome, exit_reason)
+            self._update_diagnostics(signal_id, current_price, f"tp{number}", final_outcome, exit_reason, high, low, timestamp, exit_atr if final_outcome else None)
             if number == 1 and self.settings.move_stop_to_breakeven_after_tp1:
                 self._move_stop_to_breakeven(row, current_price)
         if any(update.update_type == "tp3" for update in updates):
@@ -218,15 +234,23 @@ class ActiveSignalTracker:
         event: Optional[str] = None,
         final_outcome: Optional[str] = None,
         exit_reason: Optional[str] = None,
+        high: Optional[float] = None,
+        low: Optional[float] = None,
+        timestamp: Optional[str] = None,
+        exit_atr: Optional[float] = None,
     ) -> None:
         if self.diagnostics is None:
             return
         self.diagnostics.update_outcome(
             active_signal_id=active_signal_id,
             current_price=current_price,
+            high=high,
+            low=low,
+            timestamp=timestamp,
             event=event,
             final_outcome=final_outcome,
             exit_reason=exit_reason,
+            exit_atr=exit_atr,
         )
 
     def _create_update(self, row, update_type: str, price: float, status: str) -> Optional[SignalUpdate]:

@@ -35,6 +35,72 @@ class Database:
         self._add_column_if_missing(conn, "completed_trades", "alert_type", "TEXT NOT NULL DEFAULT 'trade_candidate'")
         self._add_column_if_missing(conn, "signal_diagnostics", "alert_type", "TEXT NOT NULL DEFAULT 'trade_candidate'")
         self._add_column_if_missing(conn, "signal_outcome_diagnostics", "alert_type", "TEXT NOT NULL DEFAULT 'trade_candidate'")
+        for column, definition in {
+            "git_commit_hash": "TEXT",
+            "strategy_version": "TEXT",
+            "schema_version": "TEXT",
+            "research_dataset_version": "TEXT",
+            "config_hash": "TEXT",
+            "distance_from_ema21": "REAL",
+            "distance_from_ema50": "REAL",
+            "distance_from_recent_swing_low": "REAL",
+            "stop_to_swing_low_distance": "REAL",
+            "bars_since_breakout": "INTEGER",
+            "entry_open": "REAL",
+            "entry_high": "REAL",
+            "entry_low": "REAL",
+            "entry_close": "REAL",
+            "entry_volume": "REAL",
+            "previous_open": "REAL",
+            "previous_high": "REAL",
+            "previous_low": "REAL",
+            "previous_close": "REAL",
+            "previous_volume": "REAL",
+            "spy_state": "TEXT",
+            "qqq_state": "TEXT",
+            "vix_value": "REAL",
+            "spread_at_entry": "REAL",
+            "slippage_proxy": "REAL",
+            "gap_flag": "INTEGER",
+            "minutes_after_market_open": "REAL",
+            "day_of_week": "INTEGER",
+            "open_positions_count": "INTEGER",
+            "open_positions_same_sector": "INTEGER",
+        }.items():
+            self._add_column_if_missing(conn, "signal_diagnostics", column, definition)
+        for column, definition in {
+            "breakout_distance_atr": "REAL",
+            "distance_from_ema21": "REAL",
+            "distance_from_ema50": "REAL",
+            "distance_from_recent_swing_low": "REAL",
+            "stop_to_swing_low_distance": "REAL",
+            "bars_since_breakout": "INTEGER",
+            "entry_open": "REAL",
+            "entry_high": "REAL",
+            "entry_low": "REAL",
+            "entry_close": "REAL",
+            "entry_volume": "REAL",
+            "previous_open": "REAL",
+            "previous_high": "REAL",
+            "previous_low": "REAL",
+            "previous_close": "REAL",
+            "previous_volume": "REAL",
+            "gap_flag": "INTEGER",
+        }.items():
+            self._add_column_if_missing(conn, "rejected_candidate_diagnostics", column, definition)
+        for column, definition in {
+            "time_to_mfe_seconds": "REAL",
+            "time_to_mae_seconds": "REAL",
+            "time_to_025r_seconds": "REAL",
+            "time_to_050r_seconds": "REAL",
+            "time_to_075r_seconds": "REAL",
+            "time_to_100r_seconds": "REAL",
+            "exit_price": "REAL",
+            "exit_timestamp": "TEXT",
+            "exit_atr": "REAL",
+            "realized_r": "REAL",
+        }.items():
+            self._add_column_if_missing(conn, "signal_outcome_diagnostics", column, definition)
 
     @staticmethod
     def _add_column_if_missing(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:

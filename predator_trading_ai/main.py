@@ -69,6 +69,7 @@ class PredatorTradingAI:
         self.scan_signals_generated = 0
         self.scan_signals_suppressed = 0
         self.scan_suppression_reasons: Counter[str] = Counter()
+        self.universe_scan_metrics = self.new_universe_scan_metrics()
         self.watchlist = parse_watchlist(self.settings.watchlist)
         watchlist_issues = validate_watchlist(self.watchlist)
         if watchlist_issues:
@@ -160,6 +161,8 @@ class PredatorTradingAI:
     def run_iteration(self) -> None:
         self.logger.info("Starting market data iteration for %d tickers.", len(self.watchlist))
         self.reset_scan_alert_summary()
+        self.universe_scan_metrics = self.new_universe_scan_metrics()
+        self.universe_scan_metrics["symbols_scanned"] = len(self.watchlist)
         self.market_context = self.load_market_context()
         self.run_tp_sl_monitor()
         had_failure = False
@@ -168,6 +171,7 @@ class PredatorTradingAI:
                 self.process_ticker(ticker)
             except Exception as exc:
                 had_failure = True
+                self.universe_scan_metrics["api_failures"] += 1
                 self.logger.exception("Unhandled error while processing %s; continuing: %s", ticker, exc)
                 self.record_health("scanner", "error", f"{ticker}: {exc}")
         if had_failure:
@@ -183,6 +187,7 @@ class PredatorTradingAI:
             self.state_store.mark_scan(self.state)
             self.record_health("scanner", "ok", "iteration completed")
         self.log_scan_alert_summary()
+        self.signal_diagnostics.record_universe_snapshot(**self.universe_scan_metrics)
 
     def start_monitoring_workers(self) -> None:
         self.logger.info("Starting ActiveSignalTracker...")
@@ -213,7 +218,11 @@ class PredatorTradingAI:
                 if snapshot is None:
                     self.logger.warning("TP/SL monitor skipped %s: latest snapshot missing.", ticker)
                     continue
-                self.process_active_signal_updates(ticker, snapshot.price)
+                self.process_active_signal_updates(
+                    ticker,
+                    snapshot.price,
+                    timestamp=self.snapshot_timestamp(snapshot),
+                )
             except Exception as exc:
                 self.logger.exception("TP/SL monitor failed for %s; continuing: %s", ticker, exc)
 
@@ -230,9 +239,12 @@ class PredatorTradingAI:
             )
             if bars is None:
                 self.add_rejection(diagnostic, "market bars failed after retries")
+                self.universe_scan_metrics["api_failures"] += 1
                 raise RuntimeError(f"{ticker} market bars failed after retries")
             if bars.empty:
                 self.add_rejection(diagnostic, "missing/empty market data")
+                self.universe_scan_metrics["symbols_skipped"] += 1
+                self.universe_scan_metrics["missing_market_data"] += 1
                 self.logger.warning("Skipping %s: no market bars available.", ticker)
                 return
 
@@ -251,12 +263,24 @@ class PredatorTradingAI:
             self.log_regime(ticker, regime)
             if snapshot is None:
                 self.add_rejection(diagnostic, "missing latest quote/trade snapshot")
+                self.universe_scan_metrics["symbols_skipped"] += 1
+                self.universe_scan_metrics["missing_market_data"] += 1
                 self.logger.warning("Skipping %s signal generation: latest quote/trade snapshot missing.", ticker)
                 return
-            self.process_active_signal_updates(ticker, snapshot.price)
+            latest = bars.iloc[-1]
+            self.universe_scan_metrics["symbols_successfully_evaluated"] += 1
+            self.process_active_signal_updates(
+                ticker,
+                snapshot.price,
+                high=float(latest.get("high", snapshot.price) or snapshot.price),
+                low=float(latest.get("low", snapshot.price) or snapshot.price),
+                timestamp=self.snapshot_timestamp(snapshot),
+                exit_atr=float(latest.get("atr_14", 0) or 0),
+            )
             if self.is_extreme_illiquidity(snapshot):
                 reason = f"extreme illiquidity or invalid spread: bid={snapshot.bid} ask={snapshot.ask}"
                 self.add_rejection(diagnostic, "liquidity/spread filter failed")
+                self.universe_scan_metrics["symbols_skipped"] += 1
                 self.log_rejected_or_watch(ticker, bars, regime, "liquidity", reason, allow_watch=False)
                 self.logger.info(
                     "Ticker %s score=0 grade_candidate=blocked rejected_by=liquidity reason=%s",
@@ -413,6 +437,12 @@ class PredatorTradingAI:
                 bars=bars,
                 regime=regime,
                 telegram_note=SignalEngine.short_note(signal.reason, observe_only=False),
+                settings=self.settings,
+                snapshot=snapshot,
+                market_context=self.market_context,
+                open_positions_count=self.active_signal_tracker.active_count(),
+                open_positions_same_sector=self.active_positions_in_sector(SECTOR_BY_TICKER.get(ticker)),
+                git_commit_hash=self.current_commit_hash(),
             )
             self.state.last_telegram_alert = alert_key
             self.state_store.set_cooldown(self.state, alert_key)
@@ -625,6 +655,11 @@ class PredatorTradingAI:
                     regime=regime,
                     telegram_note=SignalEngine.short_note(setup.reason, observe_only=True, bear_regime=self.is_bear_watch_regime(regime)),
                     alert_type="experimental_watch",
+                    settings=self.settings,
+                    market_context=getattr(self, "market_context", {}),
+                    open_positions_count=self.active_signal_tracker.active_count(),
+                    open_positions_same_sector=self.active_positions_in_sector(SECTOR_BY_TICKER.get(ticker)),
+                    git_commit_hash=self.current_commit_hash(),
                 )
         self.state.last_telegram_alert = alert_key
         self.state_store.set_cooldown(self.state, alert_key)
@@ -669,8 +704,23 @@ class PredatorTradingAI:
             decision.reason,
         )
 
-    def process_active_signal_updates(self, ticker: str, current_price: float) -> None:
-        updates = self.active_signal_tracker.check_ticker(ticker, current_price)
+    def process_active_signal_updates(
+        self,
+        ticker: str,
+        current_price: float,
+        high: Optional[float] = None,
+        low: Optional[float] = None,
+        timestamp: Optional[str] = None,
+        exit_atr: Optional[float] = None,
+    ) -> None:
+        updates = self.active_signal_tracker.check_ticker(
+            ticker,
+            current_price,
+            high=high,
+            low=low,
+            timestamp=timestamp,
+            exit_atr=exit_atr,
+        )
         for update in updates:
             self.logger.info(
                 "Active signal update for %s: %s at %.2f",
@@ -684,6 +734,31 @@ class PredatorTradingAI:
         self.scan_signals_generated = 0
         self.scan_signals_suppressed = 0
         self.scan_suppression_reasons.clear()
+
+    @staticmethod
+    def new_universe_scan_metrics() -> dict[str, int]:
+        return {
+            "symbols_scanned": 0,
+            "symbols_skipped": 0,
+            "api_failures": 0,
+            "missing_market_data": 0,
+            "symbols_successfully_evaluated": 0,
+        }
+
+    @staticmethod
+    def snapshot_timestamp(snapshot) -> Optional[str]:
+        timestamp = getattr(snapshot, "timestamp", None)
+        return timestamp.isoformat() if timestamp else None
+
+    def active_positions_in_sector(self, sector: Optional[str]) -> int:
+        if not sector:
+            return 0
+        rows = self.db.fetch_all("SELECT ticker FROM active_signals WHERE status = 'active'")
+        return sum(
+            1
+            for row in rows
+            if SECTOR_BY_TICKER.get(str(row["ticker"]).upper()) == sector
+        )
 
     def record_signal_generated(self) -> None:
         self.scan_signals_generated += 1
@@ -886,6 +961,24 @@ class PredatorTradingAI:
                 timeout=2,
             )
             return f"git={completed.stdout.strip()}"
+        except Exception:
+            return "unknown"
+
+    @staticmethod
+    def current_commit_hash() -> str:
+        for key in ("RAILWAY_GIT_COMMIT_SHA", "RAILWAY_GIT_COMMIT", "SOURCE_COMMIT", "GIT_COMMIT_SHA"):
+            value = os.getenv(key)
+            if value:
+                return value
+        try:
+            completed = subprocess.run(
+                ["git", "rev-parse", "--short=12", "HEAD"],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=2,
+            )
+            return completed.stdout.strip()
         except Exception:
             return "unknown"
 
