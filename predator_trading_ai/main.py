@@ -207,6 +207,7 @@ class PredatorTradingAI:
             self.logger.warning("TP/SL monitor was not started; starting now.")
             self.tp_sl_monitor_started = True
         active_tickers = self.active_signal_tracker.active_tickers()
+        self.db.set_state("tp_sl_monitor_heartbeat_utc", datetime.now(timezone.utc).isoformat())
         self.logger.info("TP/SL monitor running. active_tickers=%d", len(active_tickers))
         for ticker in active_tickers:
             try:

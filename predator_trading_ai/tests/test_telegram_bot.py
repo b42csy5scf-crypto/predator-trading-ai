@@ -314,3 +314,39 @@ def test_research_report_commands_are_handled_without_application_polling(monkey
         ("123", "Generating Predator research report (7d)..."),
         ("123", "Generating Predator research report (30d)..."),
     ]
+
+
+def test_monitor_status_command_is_handled_without_application_polling(monkeypatch) -> None:
+    sent: list[tuple[str, str]] = []
+
+    class FakeMessage:
+        text = "/monitor_status"
+
+    update = type(
+        "FakeUpdate",
+        (),
+        {
+            "message": FakeMessage(),
+            "effective_chat": type("FakeChat", (), {"id": "123"})(),
+        },
+    )()
+
+    class FakeBot:
+        async def send_message(self, chat_id, text):
+            sent.append((chat_id, text))
+
+    class FakeRunner:
+        def __init__(self, settings, db):
+            pass
+
+        async def build_and_send(self):
+            return type("Result", (), {"sent": True})()
+
+    import predator_trading_ai.reports.monitor_status_runner as monitor_status_runner
+
+    monkeypatch.setattr(monitor_status_runner, "MonitorStatusRunner", FakeRunner)
+    bot = TelegramAlertBot(Settings(telegram_bot_token="token", telegram_chat_id="123"))
+
+    asyncio.run(bot.handle_command_update(FakeBot(), update))
+
+    assert sent == []

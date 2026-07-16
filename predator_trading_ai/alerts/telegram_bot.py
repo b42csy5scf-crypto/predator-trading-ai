@@ -138,11 +138,21 @@ class TelegramAlertBot:
             return
         command = str(message.text).strip().split()[0].split("@")[0]
         research_commands = {"/research_report": 30, "/research_report_7d": 7, "/research_report_30d": 30}
-        if command not in {"/report", "/diagnostics_report", *research_commands}:
+        if command not in {"/report", "/diagnostics_report", "/monitor_status", *research_commands}:
             return
         chat_id = str(update.effective_chat.id) if getattr(update, "effective_chat", None) else ""
         if chat_id not in self.configured_chat_ids():
             await bot.send_message(chat_id=chat_id, text="Unauthorized.")
+            return
+        if command == "/monitor_status":
+            from predator_trading_ai.reports.monitor_status_runner import MonitorStatusRunner
+
+            result = await MonitorStatusRunner(self.settings, self.db).build_and_send()
+            if not result.sent:
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text="Monitor status generated, but Telegram recipients are not configured.",
+                )
             return
         if command in research_commands:
             days = research_commands[command]
