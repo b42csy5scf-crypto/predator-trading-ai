@@ -11,6 +11,8 @@ from predator_trading_ai.config import Settings
 from predator_trading_ai.database.db import (
     Database,
     DatabaseConfigurationError,
+    DatabaseConnectionError,
+    TIMESTAMPTZ_COLUMNS,
     replace_qmark_placeholders,
 )
 from predator_trading_ai.engines.active_signal_tracker import ActiveSignalTracker
@@ -33,11 +35,16 @@ def test_malformed_database_url_fails_clearly() -> None:
         Database(Settings(database_url="mysql://user:password@example/db"))
 
 
-def test_postgresql_unavailable_does_not_create_sqlite_fallback(tmp_path) -> None:
+def test_postgresql_unavailable_does_not_create_sqlite_fallback(tmp_path, monkeypatch) -> None:
     sqlite_path = tmp_path / "should_not_exist.db"
     db = Database(Settings(database_url="postgresql://user:password@example.invalid:5432/dbname"))
 
-    with pytest.raises((DatabaseConfigurationError, Exception)) as excinfo:
+    def fail_connect():
+        raise DatabaseConnectionError("PostgreSQL connection failed: OperationalError")
+
+    monkeypatch.setattr(db, "connect", fail_connect)
+
+    with pytest.raises(DatabaseConnectionError) as excinfo:
         db.initialize()
 
     assert "password" not in str(excinfo.value)
@@ -62,6 +69,79 @@ def test_postgresql_query_adapter_handles_sqlite_datetime_helpers() -> None:
     assert "CURRENT_DATE" in sql
     assert "datetime('now'" not in sql
     assert params == ("-7 days", 1)
+
+
+def test_postgresql_schema_uses_native_timestamp_types() -> None:
+    db = Database(Settings(database_url="postgresql://user:password@example.invalid:5432/dbname"))
+    statements = "\n".join(db._postgres_schema_statements())
+
+    assert "created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP" in statements
+    assert "timestamp TIMESTAMPTZ NOT NULL" in statements
+    assert "exit_timestamp TIMESTAMPTZ" in statements
+    assert "signal_diagnostics" in statements
+    assert "price_path" in statements
+
+
+def test_postgresql_timestamp_migration_generates_safe_alters() -> None:
+    class FakeCursor:
+        def __init__(self):
+            self.statements: list[tuple[str, list | None]] = []
+            self.current_table = ""
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def execute(self, sql, params=None):
+            self.statements.append((sql, params))
+            if "information_schema.columns" in sql:
+                self.current_table = params[0]
+
+        def fetchall(self):
+            return [
+                {"column_name": column, "data_type": "text"}
+                for column in TIMESTAMPTZ_COLUMNS.get(self.current_table, set())
+            ]
+
+    class FakeConn:
+        def __init__(self):
+            self.cursor_obj = FakeCursor()
+
+        def cursor(self):
+            return self.cursor_obj
+
+    db = Database(Settings(database_url="postgresql://user:password@example.invalid:5432/dbname"))
+    conn = FakeConn()
+    db._migrate_postgres_timestamp_columns(conn)
+    sql_text = "\n".join(sql for sql, _ in conn.cursor_obj.statements)
+
+    assert "ALTER TABLE signal_diagnostics" in sql_text
+    assert "ALTER COLUMN created_at TYPE TIMESTAMPTZ" in sql_text
+    assert "WHEN created_at IS NULL THEN NULL" in sql_text
+    assert "WHEN btrim(created_at::text) = '' THEN NULL" in sql_text
+    assert "created_at::timestamptz" in sql_text
+    assert "ALTER TABLE price_path" in sql_text
+
+
+def test_postgresql_retention_cleanup_uses_cutoff_parameters() -> None:
+    class CaptureDatabase(Database):
+        def __init__(self):
+            super().__init__(Settings(database_url="postgresql://user:password@example.invalid:5432/dbname"))
+            self.calls = []
+
+        def execute(self, sql, params=()):
+            self.calls.append((sql, list(params)))
+            return 0
+
+    db = CaptureDatabase()
+    db.cleanup_signal_diagnostics(retention_days=30)
+
+    assert len(db.calls) == 3
+    assert all("CURRENT_TIMESTAMP" not in sql for sql, _ in db.calls)
+    assert all("datetime('now'" not in sql for sql, _ in db.calls)
+    assert all(params and hasattr(params[0], "tzinfo") for _, params in db.calls)
 
 
 def test_sqlite_mapping_rows_and_transaction_rollback(tmp_path) -> None:
