@@ -137,11 +137,24 @@ class TelegramAlertBot:
         if message is None or not getattr(message, "text", ""):
             return
         command = str(message.text).strip().split()[0].split("@")[0]
-        if command not in {"/report", "/diagnostics_report"}:
+        research_commands = {"/research_report": 30, "/research_report_7d": 7, "/research_report_30d": 30}
+        if command not in {"/report", "/diagnostics_report", *research_commands}:
             return
         chat_id = str(update.effective_chat.id) if getattr(update, "effective_chat", None) else ""
         if chat_id not in self.configured_chat_ids():
             await bot.send_message(chat_id=chat_id, text="Unauthorized.")
+            return
+        if command in research_commands:
+            days = research_commands[command]
+            await bot.send_message(chat_id=chat_id, text=f"Generating Predator research report ({days}d)...")
+            from predator_trading_ai.reports.research_report_runner import ResearchReportRunner
+
+            result = await ResearchReportRunner(self.settings, self.db, days=days).build_and_send()
+            if not result.sent:
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text="Research report generated, but Telegram recipients are not configured.",
+                )
             return
         if command == "/diagnostics_report":
             await bot.send_message(chat_id=chat_id, text="Generating Predator diagnostics report...")
