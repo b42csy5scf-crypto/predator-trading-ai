@@ -269,9 +269,68 @@ def test_research_report_rejections_json_csv_and_read_only(tmp_path) -> None:
     after = table_counts(db)
 
     assert payload["rejection_analytics"]["score_distribution"]["count"] == 1
+    assert payload["rejection_analytics"]["legacy_count"] == 1
+    assert payload["rejection_analytics"]["verified_v2_count"] == 0
     assert (csv_dir / "per_signal_audit.csv").exists()
     assert (csv_dir / "rejection_summary.csv").exists()
     assert before == after
+
+
+def test_research_report_v2_rejections_do_not_mix_legacy_labels(tmp_path) -> None:
+    db = make_db(tmp_path)
+    db.insert_dict(
+        "rejected_candidate_diagnostics",
+        {
+            "ticker": "AAPL",
+            "final_score": 56,
+            "computed_grade": "B Watch Alert",
+            "first_rejection_gate": "grade_below_trade_candidate_threshold",
+            "rejection_reasons_json": ["Grade below trade threshold"],
+            "conditions_passed_json": ["Price above EMA50"],
+            "conditions_failed_json": ["Grade below trade threshold"],
+            "diagnostics_format_version": 2,
+            "evaluated_conditions_json": [
+                {"condition_key": "price_above_ema50", "display_name": "Price above EMA50", "result": "PASS", "is_blocking": False},
+                {
+                    "condition_key": "grade_below_trade_candidate_threshold",
+                    "display_name": "Grade below trade threshold",
+                    "result": "FAIL",
+                    "is_blocking": True,
+                },
+            ],
+            "passed_conditions_v2_json": [
+                {"condition_key": "price_above_ema50", "display_name": "Price above EMA50", "result": "PASS", "is_blocking": False}
+            ],
+            "failed_conditions_v2_json": [
+                {
+                    "condition_key": "grade_below_trade_candidate_threshold",
+                    "display_name": "Grade below trade threshold",
+                    "result": "FAIL",
+                    "is_blocking": True,
+                }
+            ],
+            "blocking_conditions_json": [
+                {
+                    "condition_key": "grade_below_trade_candidate_threshold",
+                    "display_name": "Grade below trade threshold",
+                    "result": "FAIL",
+                    "is_blocking": True,
+                }
+            ],
+            "actual_first_blocking_gate": "grade_below_trade_candidate_threshold",
+            "why_not_trade": "Grade below trade threshold",
+            "raw_metrics_json": {},
+        },
+    )
+    insert_rejected(db, "MSFT", 55)
+
+    data = ResearchReport(db, days=30).build_data()["rejection_analytics"]
+
+    assert data["verified_v2_count"] == 1
+    assert data["legacy_count"] == 1
+    assert data["top_actual_blocking_gates"] == [("grade_below_trade_candidate_threshold", 1)]
+    assert data["top_passed_conditions"] == [("Price above EMA50", 1)]
+    assert data["legacy_rejection_labels"]
 
 
 def test_research_report_runner_builds_without_database_mutation(tmp_path) -> None:

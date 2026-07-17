@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import subprocess
-from dataclasses import asdict, is_dataclass
+from dataclasses import asdict, dataclass, is_dataclass
 from datetime import datetime, timezone
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
@@ -17,9 +17,23 @@ from predator_trading_ai.engines.signal_engine import TradingSignal
 from predator_trading_ai.engines.strategy_engine import StrategySetup
 from predator_trading_ai.utils.validators import spread_pct
 from predator_trading_ai.utils.watchlist import SECTOR_BY_TICKER
+from predator_trading_ai.utils.logger import setup_logger
 
 
 EASTERN = ZoneInfo("America/New_York")
+
+
+@dataclass(frozen=True)
+class ConditionRecord:
+    condition_key: str
+    display_name: str
+    lhs_value: Any = None
+    rhs_value: Any = None
+    operator: str = ""
+    result: str = "UNKNOWN"
+    is_blocking: bool = False
+    evaluation_order: int = 0
+    reason_code: Optional[str] = None
 
 
 class SignalDiagnosticsRecorder:
@@ -32,6 +46,7 @@ class SignalDiagnosticsRecorder:
 
     def __init__(self, db: Database) -> None:
         self.db = db
+        self.logger = setup_logger(__name__)
 
     def record_accepted_signal(
         self,
@@ -166,23 +181,51 @@ class SignalDiagnosticsRecorder:
         conditions_failed: list[str],
         bars: Optional[pd.DataFrame],
         regime: Optional[MarketRegime],
+        settings: Optional[Settings] = None,
+        evaluated_conditions: Optional[list[dict[str, Any]]] = None,
     ) -> None:
         if final_score < 50:
             return
         setup = self.synthetic_setup(ticker, final_score, computed_grade, bars)
         metrics = self.market_metrics(bars, setup, regime) if bars is not None and not bars.empty else {}
         entry_quality = self.entry_quality_metrics(bars, setup) if bars is not None and not bars.empty else {}
+        canonical = self.canonical_rejected_conditions(
+            final_score=final_score,
+            computed_grade=computed_grade,
+            first_rejection_gate=first_rejection_gate,
+            rejection_reasons=rejection_reasons,
+            conditions_passed=conditions_passed,
+            conditions_failed=conditions_failed,
+            bars=bars,
+            regime=regime,
+            evaluated_conditions=evaluated_conditions,
+        )
+        validation_errors = self.validate_rejected_diagnostics(canonical)
+        if validation_errors:
+            self.logger.warning(
+                "Rejected candidate diagnostics validation failed ticker=%s errors=%s",
+                ticker,
+                "; ".join(validation_errors),
+            )
+        if settings is not None and getattr(settings, "enable_gate_audit_logs", False):
+            self.log_gate_audit(ticker, final_score, computed_grade, canonical)
         self.db.insert_dict(
             "rejected_candidate_diagnostics",
             {
                 "ticker": ticker,
                 "final_score": final_score,
                 "computed_grade": computed_grade,
-                "first_rejection_gate": first_rejection_gate,
-                "rejection_reasons_json": rejection_reasons,
-                "conditions_passed_json": conditions_passed,
-                "conditions_failed_json": conditions_failed,
-                "why_not_trade": "; ".join(rejection_reasons) or "candidate was not accepted",
+                "first_rejection_gate": canonical["actual_first_blocking_gate"],
+                "rejection_reasons_json": canonical["legacy_rejection_reasons"],
+                "conditions_passed_json": canonical["legacy_passed_conditions"],
+                "conditions_failed_json": canonical["legacy_failed_conditions"],
+                "diagnostics_format_version": 2,
+                "evaluated_conditions_json": canonical["evaluated_conditions"],
+                "passed_conditions_v2_json": canonical["passed_conditions"],
+                "failed_conditions_v2_json": canonical["failed_conditions"],
+                "blocking_conditions_json": canonical["blocking_conditions"],
+                "actual_first_blocking_gate": canonical["actual_first_blocking_gate"],
+                "why_not_trade": "; ".join(canonical["legacy_rejection_reasons"]) or "candidate was not accepted",
                 **entry_quality,
                 "raw_metrics_json": {
                     **metrics,
@@ -194,6 +237,216 @@ class SignalDiagnosticsRecorder:
                 },
             },
         )
+
+    def canonical_rejected_conditions(
+        self,
+        *,
+        final_score: float,
+        computed_grade: str,
+        first_rejection_gate: Optional[str],
+        rejection_reasons: list[str],
+        conditions_passed: list[str],
+        conditions_failed: list[str],
+        bars: Optional[pd.DataFrame],
+        regime: Optional[MarketRegime],
+        evaluated_conditions: Optional[list[dict[str, Any]]] = None,
+    ) -> dict[str, Any]:
+        if evaluated_conditions:
+            records = [dict(item) for item in evaluated_conditions]
+        else:
+            records = self.build_condition_records(
+                final_score=final_score,
+                computed_grade=computed_grade,
+                first_rejection_gate=first_rejection_gate,
+                rejection_reasons=rejection_reasons,
+                conditions_passed=conditions_passed,
+                conditions_failed=conditions_failed,
+                bars=bars,
+                regime=regime,
+            )
+        passed_keys = {item["condition_key"] for item in records if item.get("result") == "PASS"}
+        failed = [item for item in records if item.get("result") == "FAIL"]
+        blocking = [item for item in failed if item.get("is_blocking")]
+        legacy_rejections = [
+            self.failure_display(item)
+            for item in blocking
+            if item.get("condition_key") not in passed_keys
+        ]
+        actual_first = blocking[0]["condition_key"] if blocking else None
+        return {
+            "evaluated_conditions": records,
+            "passed_conditions": [item for item in records if item.get("result") == "PASS"],
+            "failed_conditions": failed,
+            "blocking_conditions": blocking,
+            "actual_first_blocking_gate": actual_first,
+            "legacy_rejection_reasons": list(dict.fromkeys(legacy_rejections)),
+            "legacy_passed_conditions": [item["display_name"] for item in records if item.get("result") == "PASS"],
+            "legacy_failed_conditions": [self.failure_display(item) for item in failed],
+        }
+
+    def build_condition_records(
+        self,
+        *,
+        final_score: float,
+        computed_grade: str,
+        first_rejection_gate: Optional[str],
+        rejection_reasons: list[str],
+        conditions_passed: list[str],
+        conditions_failed: list[str],
+        bars: Optional[pd.DataFrame],
+        regime: Optional[MarketRegime],
+    ) -> list[dict[str, Any]]:
+        latest = bars.iloc[-1] if bars is not None and not bars.empty else {}
+        values = self.condition_values(latest, regime)
+        records: list[ConditionRecord] = []
+        seen: set[tuple[str, str]] = set()
+
+        def append(label: str, result: str, blocking: bool = False, reason_code: Optional[str] = None) -> None:
+            condition = self.condition_from_label(label, values)
+            key = condition.condition_key
+            identity = (key, result)
+            if identity in seen:
+                return
+            seen.add(identity)
+            records.append(
+                ConditionRecord(
+                    condition_key=key,
+                    display_name=condition.display_name,
+                    lhs_value=condition.lhs_value,
+                    rhs_value=condition.rhs_value,
+                    operator=condition.operator,
+                    result=result,
+                    is_blocking=blocking,
+                    evaluation_order=len(records) + 1,
+                    reason_code=reason_code,
+                )
+            )
+
+        for label in conditions_passed:
+            append(label, "PASS", blocking=False)
+
+        passed_keys = {self.condition_from_label(label, values).condition_key for label in conditions_passed}
+        if computed_grade in {"B Watch Alert", "C Risky/Early Alert"} and "grade below" in (first_rejection_gate or "").lower():
+            append("Grade below A", "FAIL", blocking=True, reason_code="grade_below_trade_candidate_threshold")
+        for label in [*conditions_failed, *rejection_reasons]:
+            condition = self.condition_from_label(label, values)
+            if condition.condition_key in passed_keys:
+                continue
+            append(label, "FAIL", blocking=True, reason_code="blocking_failure")
+
+        if computed_grade in {"B Watch Alert", "C Risky/Early Alert"}:
+            append("Grade below A", "FAIL", blocking=True, reason_code="grade_below_trade_candidate_threshold")
+        elif not records and first_rejection_gate:
+            append(first_rejection_gate, "FAIL", blocking=True, reason_code="first_rejection_gate")
+        return [asdict(item) for item in records]
+
+    @staticmethod
+    def condition_values(latest: Any, regime: Optional[MarketRegime]) -> dict[str, Any]:
+        def value(name: str) -> Any:
+            try:
+                return float(latest.get(name)) if latest.get(name) is not None else None
+            except Exception:
+                return None
+
+        close = value("close")
+        ema21 = value("ema_21")
+        ema50 = value("ema_50")
+        ema200 = value("ema_200")
+        ema9 = value("ema_9")
+        atr = value("atr_14")
+        distance_ema21 = abs(close - ema21) / max(atr or 0, (close or 0) * 0.005, 0.01) if close and ema21 else None
+        return {
+            "close": close,
+            "ema9": ema9,
+            "ema21": ema21,
+            "ema50": ema50,
+            "ema200": ema200,
+            "relative_volume": value("relative_volume"),
+            "return_20": value("return_20"),
+            "macd": value("macd"),
+            "macd_signal": value("macd_signal"),
+            "distance_ema21": distance_ema21,
+            "spy_trend": regime.spy_trend if regime else None,
+            "qqq_trend": regime.qqq_trend if regime else None,
+        }
+
+    @classmethod
+    def condition_from_label(cls, label: str, values: dict[str, Any]) -> ConditionRecord:
+        normalized = (label or "").strip().lower()
+        if "price above ema50" in normalized or "price below ema50" in normalized:
+            return ConditionRecord("price_above_ema50", "Price above EMA50", values.get("close"), values.get("ema50"), ">")
+        if "ema50 above ema200" in normalized or "ema50 below ema200" in normalized:
+            return ConditionRecord("ema50_above_ema200", "EMA50 above EMA200", values.get("ema50"), values.get("ema200"), ">=")
+        if "short-term momentum" in normalized:
+            return ConditionRecord("short_term_momentum_improving", "Short-term momentum improving", values.get("ema9"), values.get("ema21"), ">")
+        if "not too extended from ema21" in normalized or "extended from ema21" in normalized:
+            return ConditionRecord("not_too_extended_from_ema21", "Not too extended from EMA21", values.get("distance_ema21"), 2.75, "<=")
+        if "positive 20-bar strength" in normalized or "negative 20-bar strength" in normalized:
+            return ConditionRecord("positive_20_bar_strength", "Positive 20-bar strength", values.get("return_20"), 0, ">")
+        if "macd momentum" in normalized:
+            return ConditionRecord("macd_momentum_improving", "MACD momentum improving", values.get("macd"), values.get("macd_signal"), ">")
+        if "spy/qqq" in normalized or "spy or qqq" in normalized:
+            return ConditionRecord("spy_or_qqq_healthy", "SPY or QQQ healthy", values.get("spy_trend"), values.get("qqq_trend"), "OR")
+        if "relative volume" in normalized or "volume" in normalized:
+            return ConditionRecord("relative_volume_confirmed", "Relative volume confirmed", values.get("relative_volume"), None, ">=")
+        if "grade below" in normalized:
+            return ConditionRecord("grade_below_trade_candidate_threshold", "Grade below trade threshold", None, None, "<")
+        key = "".join(ch if ch.isalnum() else "_" for ch in normalized).strip("_") or "unknown"
+        return ConditionRecord(key, (label or "Unknown").strip())
+
+    @staticmethod
+    def failure_display(condition: dict[str, Any]) -> str:
+        display = str(condition.get("display_name") or condition.get("condition_key") or "Unknown")
+        negative = {
+            "Price above EMA50": "Price not above EMA50",
+            "EMA50 above EMA200": "EMA50 not above EMA200",
+            "Short-term momentum improving": "Short-term momentum not improving",
+            "Not too extended from EMA21": "Extended from EMA21",
+            "Positive 20-bar strength": "20-bar strength not positive",
+            "MACD momentum improving": "MACD momentum not improving",
+            "SPY or QQQ healthy": "SPY/QQQ not healthy",
+            "Relative volume confirmed": "Relative volume not confirmed",
+        }
+        return negative.get(display, display)
+
+    def validate_rejected_diagnostics(self, canonical: dict[str, Any]) -> list[str]:
+        errors: list[str] = []
+        passed_keys = {item["condition_key"] for item in canonical["passed_conditions"]}
+        failed_keys = {item["condition_key"] for item in canonical["failed_conditions"]}
+        if passed_keys & failed_keys:
+            errors.append(f"conditions in both passed and failed: {sorted(passed_keys & failed_keys)}")
+        blocking = canonical["blocking_conditions"]
+        blocking_keys = {item["condition_key"] for item in blocking}
+        if not blocking_keys <= failed_keys:
+            errors.append("blocking condition not present in failed conditions")
+        for item in blocking:
+            if not item.get("result"):
+                errors.append(f"blocking condition missing result: {item.get('condition_key')}")
+            if item.get("result") == "PASS":
+                errors.append(f"blocking condition marked PASS: {item.get('condition_key')}")
+        if canonical["actual_first_blocking_gate"] and canonical["actual_first_blocking_gate"] not in blocking_keys:
+            errors.append("first blocking gate not present in blocking conditions")
+        rejection_keys = {self.condition_from_label(reason, {}).condition_key for reason in canonical["legacy_rejection_reasons"]}
+        if rejection_keys & passed_keys:
+            errors.append("passed condition appears in rejection reasons")
+        return errors
+
+    def log_gate_audit(self, ticker: str, final_score: float, computed_grade: str, canonical: dict[str, Any]) -> None:
+        for condition in canonical["evaluated_conditions"][:8]:
+            self.logger.info(
+                "CANDIDATE_GATE_AUDIT ticker=%s score=%.1f grade=%s condition=%s lhs=%s operator=%s rhs=%s "
+                "result=%s is_blocking=%s first_blocking_gate=%s",
+                ticker,
+                final_score,
+                computed_grade,
+                condition.get("condition_key"),
+                condition.get("lhs_value"),
+                condition.get("operator"),
+                condition.get("rhs_value"),
+                condition.get("result"),
+                condition.get("is_blocking"),
+                canonical.get("actual_first_blocking_gate"),
+            )
 
     def initialize_outcome_from_signal(
         self,

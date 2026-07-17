@@ -272,6 +272,12 @@ class Database:
         }.items():
             self._add_column_if_missing(conn, "signal_diagnostics", column, definition)
         for column, definition in {
+            "diagnostics_format_version": "INTEGER NOT NULL DEFAULT 1",
+            "evaluated_conditions_json": "TEXT NOT NULL DEFAULT '[]'",
+            "passed_conditions_v2_json": "TEXT NOT NULL DEFAULT '[]'",
+            "failed_conditions_v2_json": "TEXT NOT NULL DEFAULT '[]'",
+            "blocking_conditions_json": "TEXT NOT NULL DEFAULT '[]'",
+            "actual_first_blocking_gate": "TEXT",
             "breakout_distance_atr": "REAL",
             "distance_from_ema21": "REAL",
             "distance_from_ema50": "REAL",

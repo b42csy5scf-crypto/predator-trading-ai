@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any, Iterable, Optional
 
 from predator_trading_ai.database.db import Database
+from predator_trading_ai.engines.signal_diagnostics import SignalDiagnosticsRecorder
 
 
 TRADE_GRADES = {"A++ Signal", "A+ Signal", "A Signal"}
@@ -207,16 +208,57 @@ class DiagnosticsReport:
         return "Grade      Tot  W  L BE   Win%   MFE   MAE  FinalR  Hold"
 
     def rejection_analytics(self, rejected: list[Any]) -> list[str]:
-        first_gates = Counter(str(row["first_rejection_gate"] or "unknown") for row in rejected)
-        reasons = Counter()
-        for row in rejected:
+        verified = [row for row in rejected if self.row_version(row) >= 2]
+        legacy = [row for row in rejected if self.row_version(row) < 2]
+        blocking_gates = Counter()
+        failed_conditions = Counter()
+        passed_conditions = Counter()
+        legacy_labels = Counter()
+        for row in verified:
+            gate = self.row_get(row, "actual_first_blocking_gate") or row["first_rejection_gate"] or "unknown"
+            blocking_gates[str(gate)] += 1
+            for condition in self.decode_json_list(self.row_get(row, "failed_conditions_v2_json")):
+                failed_conditions[self.failure_display(condition)] += 1
+            for condition in self.decode_json_list(self.row_get(row, "passed_conditions_v2_json")):
+                passed_conditions[str(condition.get("display_name") if isinstance(condition, dict) else condition)] += 1
+        for row in legacy:
             for reason in self.decode_json_list(row["rejection_reasons_json"]):
-                reasons[str(reason)] += 1
-        lines = [f"Candidates rejected with score >= 50: {len(rejected)}", "Top first rejection gates:"]
-        lines.extend(self.counter_lines(first_gates, 5))
-        lines.append("Top rejection reasons:")
-        lines.extend(self.counter_lines(reasons, 5))
+                legacy_labels[str(reason)] += 1
+        lines = [
+            f"Candidates rejected with score >= 50: {len(rejected)}",
+            f"Verified diagnostics v2 rows: {len(verified)}",
+            f"Legacy/ambiguous rows: {len(legacy)}",
+            "Top actual blocking gates:",
+        ]
+        lines.extend(self.counter_lines(blocking_gates, 5))
+        lines.append("Top failed conditions:")
+        lines.extend(self.counter_lines(failed_conditions, 5))
+        lines.append("Most common passed conditions:")
+        lines.extend(self.counter_lines(passed_conditions, 5))
+        if legacy:
+            lines.append("Legacy rejection labels — condition result unavailable:")
+            lines.extend(self.counter_lines(legacy_labels, 5))
         return lines
+
+    @staticmethod
+    def row_version(row: Any) -> int:
+        try:
+            return int(row["diagnostics_format_version"] or 1)
+        except (KeyError, TypeError, ValueError):
+            return 1
+
+    @staticmethod
+    def row_get(row: Any, key: str, default: Any = None) -> Any:
+        try:
+            return row[key]
+        except (KeyError, IndexError):
+            return default
+
+    @staticmethod
+    def failure_display(condition: Any) -> str:
+        if isinstance(condition, dict):
+            return SignalDiagnosticsRecorder.failure_display(condition)
+        return str(condition)
 
     def outcome_behavior(
         self,

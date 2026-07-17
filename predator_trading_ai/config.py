@@ -118,6 +118,7 @@ try:
         move_stop_to_breakeven_after_tp1: bool = True
         alert_cooldown_minutes: int = Field(default=60, ge=0)
         graded_alert_cooldown_seconds: int = Field(default=3600, ge=0)
+        enable_gate_audit_logs: bool = False
 
         @field_validator("live_trading")
         @classmethod
@@ -208,6 +209,7 @@ except ModuleNotFoundError:
         move_stop_to_breakeven_after_tp1: bool = True
         alert_cooldown_minutes: int = 60
         graded_alert_cooldown_seconds: int = 3600
+        enable_gate_audit_logs: bool = False
 
         def __post_init__(self) -> None:
             _load_dotenv()

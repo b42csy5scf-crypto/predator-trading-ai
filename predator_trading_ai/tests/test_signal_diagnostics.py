@@ -1,3 +1,5 @@
+import json
+
 import pandas as pd
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -184,9 +186,68 @@ def test_rejected_candidate_persistence(tmp_path) -> None:
     assert len(rows) == 1
     assert rows[0]["ticker"] == "AAPL"
     assert rows[0]["final_score"] == 54
-    assert rows[0]["first_rejection_gate"] == "Grade below A"
+    assert rows[0]["first_rejection_gate"] == "grade_below_trade_candidate_threshold"
+    assert rows[0]["actual_first_blocking_gate"] == "grade_below_trade_candidate_threshold"
+    assert rows[0]["diagnostics_format_version"] == 2
     assert rows[0]["entry_open"] is not None
     assert rows[0]["breakout_distance_atr"] is not None
+
+
+def test_rejected_candidate_v2_grade_only_does_not_blame_passed_conditions(tmp_path) -> None:
+    recorder, db = make_recorder(tmp_path)
+
+    recorder.record_rejected_candidate(
+        ticker="AAPL",
+        final_score=56.2,
+        computed_grade="B Watch Alert",
+        first_rejection_gate="Grade below A",
+        rejection_reasons=["price above EMA50", "EMA50 above EMA200", "short-term momentum improving", "Grade below A"],
+        conditions_passed=["price above EMA50", "EMA50 above EMA200", "short-term momentum improving"],
+        conditions_failed=[],
+        bars=sample_bars(),
+        regime=sample_regime(),
+    )
+
+    row = db.fetch_all("SELECT * FROM rejected_candidate_diagnostics")[0]
+    passed = json.loads(row["passed_conditions_v2_json"])
+    failed = json.loads(row["failed_conditions_v2_json"])
+    blocking = json.loads(row["blocking_conditions_json"])
+    rejections = json.loads(row["rejection_reasons_json"])
+    assert {item["condition_key"] for item in passed} >= {
+        "price_above_ema50",
+        "ema50_above_ema200",
+        "short_term_momentum_improving",
+    }
+    assert "price_above_ema50" not in {item["condition_key"] for item in failed}
+    assert row["actual_first_blocking_gate"] == "grade_below_trade_candidate_threshold"
+    assert blocking[0]["condition_key"] == "grade_below_trade_candidate_threshold"
+    assert "Price above EMA50" not in rejections
+    assert "price above EMA50" not in rejections
+
+
+def test_rejected_candidate_v2_ema50_fail_is_truthful(tmp_path) -> None:
+    recorder, db = make_recorder(tmp_path)
+    bars = sample_bars()
+    bars.loc[bars.index[-1], "ema_50"] = float(bars.iloc[-1]["close"]) + 1.0
+
+    recorder.record_rejected_candidate(
+        ticker="AAPL",
+        final_score=52,
+        computed_grade="C Risky/Early Alert",
+        first_rejection_gate="price below EMA50",
+        rejection_reasons=["price below EMA50"],
+        conditions_passed=["EMA50 above EMA200"],
+        conditions_failed=["price below EMA50"],
+        bars=bars,
+        regime=sample_regime(),
+    )
+
+    row = db.fetch_all("SELECT * FROM rejected_candidate_diagnostics")[0]
+    failed = json.loads(row["failed_conditions_v2_json"])
+    rejections = json.loads(row["rejection_reasons_json"])
+    assert failed[0]["condition_key"] == "price_above_ema50"
+    assert "Price not above EMA50" in rejections
+    assert row["actual_first_blocking_gate"] == "price_above_ema50"
 
 
 def test_mfe_mae_calculation(tmp_path) -> None:

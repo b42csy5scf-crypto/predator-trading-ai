@@ -146,10 +146,83 @@ def test_diagnostics_report_separates_trade_candidates_and_strong_b(tmp_path) ->
     assert "A++ Only" not in report
     assert "Strong B Experimental Watch\nTotal: 1" in report
     assert "Candidates rejected with score >= 50: 1" in report
+    assert "Legacy rejection labels — condition result unavailable" in report
     assert "- Grade below A: 1" in report
     assert "Signals went directly to SL: 1" in report
     assert "Best by final R: NVDA 3.00R" in report
     assert "Worst by final R: PLD -1.00R" in report
+
+
+def test_diagnostics_report_separates_v2_pass_fail_and_legacy(tmp_path) -> None:
+    db = make_db(tmp_path)
+    db.insert_dict(
+        "rejected_candidate_diagnostics",
+        {
+            "ticker": "AAPL",
+            "final_score": 56,
+            "computed_grade": "B Watch Alert",
+            "first_rejection_gate": "grade_below_trade_candidate_threshold",
+            "rejection_reasons_json": ["Grade below trade threshold"],
+            "conditions_passed_json": ["Price above EMA50"],
+            "conditions_failed_json": ["Grade below trade threshold"],
+            "diagnostics_format_version": 2,
+            "evaluated_conditions_json": [
+                {"condition_key": "price_above_ema50", "display_name": "Price above EMA50", "result": "PASS", "is_blocking": False},
+                {
+                    "condition_key": "grade_below_trade_candidate_threshold",
+                    "display_name": "Grade below trade threshold",
+                    "result": "FAIL",
+                    "is_blocking": True,
+                },
+            ],
+            "passed_conditions_v2_json": [
+                {"condition_key": "price_above_ema50", "display_name": "Price above EMA50", "result": "PASS", "is_blocking": False}
+            ],
+            "failed_conditions_v2_json": [
+                {
+                    "condition_key": "grade_below_trade_candidate_threshold",
+                    "display_name": "Grade below trade threshold",
+                    "result": "FAIL",
+                    "is_blocking": True,
+                }
+            ],
+            "blocking_conditions_json": [
+                {
+                    "condition_key": "grade_below_trade_candidate_threshold",
+                    "display_name": "Grade below trade threshold",
+                    "result": "FAIL",
+                    "is_blocking": True,
+                }
+            ],
+            "actual_first_blocking_gate": "grade_below_trade_candidate_threshold",
+            "why_not_trade": "Grade below trade threshold",
+            "raw_metrics_json": {},
+        },
+    )
+    db.insert_dict(
+        "rejected_candidate_diagnostics",
+        {
+            "ticker": "MSFT",
+            "final_score": 55,
+            "computed_grade": "B Watch Alert",
+            "first_rejection_gate": "Grade below A",
+            "rejection_reasons_json": ["price above EMA50"],
+            "conditions_passed_json": ["price above EMA50"],
+            "conditions_failed_json": [],
+            "why_not_trade": "legacy",
+            "raw_metrics_json": {},
+        },
+    )
+
+    report = DiagnosticsReport(db, days=7).build()
+
+    assert "Verified diagnostics v2 rows: 1" in report
+    assert "Legacy/ambiguous rows: 1" in report
+    assert "Top actual blocking gates:" in report
+    assert "- grade_below_trade_candidate_threshold: 1" in report
+    assert "Most common passed conditions:" in report
+    assert "- Price above EMA50: 1" in report
+    assert "Legacy rejection labels — condition result unavailable:" in report
 
 
 def test_run_diagnostics_report_command(tmp_path) -> None:

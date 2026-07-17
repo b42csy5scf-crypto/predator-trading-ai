@@ -530,7 +530,7 @@ class PredatorTradingAI:
             return
         if watch_evaluation.rejected_by and watch_evaluation.rejected_by != "none":
             self.add_rejection(diagnostic, f"{watch_evaluation.rejected_by} filter failed")
-        for part in self.split_rejection_reasons(watch_evaluation.reason):
+        for part in self.split_watch_risks(watch_evaluation.reason):
             self.add_rejection(diagnostic, part)
         if watch_evaluation.grade_candidate in {"B Watch Alert", "C Risky/Early Alert"}:
             self.add_rejection(diagnostic, "Grade below A")
@@ -540,6 +540,17 @@ class PredatorTradingAI:
         return [
             part.strip()
             for part in (reason or "").replace("watch risks:", ";").split(";")
+            if part.strip()
+        ]
+
+    @staticmethod
+    def split_watch_risks(reason: str) -> list[str]:
+        marker = "watch risks:"
+        if marker not in (reason or ""):
+            return []
+        return [
+            part.strip()
+            for part in reason.split(marker, 1)[1].split(";")
             if part.strip()
         ]
 
@@ -592,6 +603,7 @@ class PredatorTradingAI:
                 conditions_failed=list(dict.fromkeys(diagnostic.get("conditions_failed", []))),
                 bars=bars,
                 regime=regime,
+                settings=self.settings,
             )
         except Exception as exc:
             self.logger.warning("Rejected candidate diagnostics persistence failed for %s: %s", diagnostic["ticker"], exc)

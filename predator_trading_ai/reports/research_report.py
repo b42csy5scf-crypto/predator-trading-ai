@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Iterable, Optional
 
 from predator_trading_ai.database.db import Database
+from predator_trading_ai.engines.signal_diagnostics import SignalDiagnosticsRecorder
 from predator_trading_ai.utils.logger import setup_logger
 from predator_trading_ai.utils.watchlist import SECTOR_BY_TICKER
 
@@ -650,23 +651,38 @@ class ResearchReport:
         return self.category_metric_map(categories, suppress_under=10)
 
     def rejection_analytics(self, rejected: list[Any]) -> dict[str, Any]:
-        reasons = Counter()
-        for row in rejected:
+        verified = [row for row in rejected if row_version(row) >= 2]
+        legacy = [row for row in rejected if row_version(row) < 2]
+        failed_conditions = Counter()
+        passed_conditions = Counter()
+        legacy_labels = Counter()
+        for row in verified:
+            for condition in decode_json_list(row_get(row, "failed_conditions_v2_json")):
+                failed_conditions[condition_failure_display(condition)] += 1
+            for condition in decode_json_list(row_get(row, "passed_conditions_v2_json")):
+                passed_conditions[str(condition.get("display_name") if isinstance(condition, dict) else condition)] += 1
+        for row in legacy:
             for reason in decode_json_list(row["rejection_reasons_json"]):
-                reasons[str(reason)] += 1
+                legacy_labels[str(reason)] += 1
         scores = [float(row["final_score"] or 0) for row in rejected]
         threshold = 58.0
         time_groups = Counter(time_bucket(optional_float(row_get(row, "minutes_after_market_open"))) for row in rejected)
         return {
-            "top_first_rejection_gates": Counter(str(row["first_rejection_gate"] or "unknown") for row in rejected).most_common(10),
-            "top_rejection_reasons": reasons.most_common(10),
+            "verified_v2_count": len(verified),
+            "legacy_count": len(legacy),
+            "top_actual_blocking_gates": Counter(str(row_get(row, "actual_first_blocking_gate") or row["first_rejection_gate"] or "unknown") for row in verified).most_common(10),
+            "top_first_rejection_gates": Counter(str(row_get(row, "actual_first_blocking_gate") or row["first_rejection_gate"] or "unknown") for row in verified).most_common(10),
+            "top_failed_conditions": failed_conditions.most_common(10),
+            "top_passed_conditions": passed_conditions.most_common(10),
+            "top_rejection_reasons": failed_conditions.most_common(10),
+            "legacy_rejection_labels": legacy_labels.most_common(10),
             "score_distribution": {"count": len(scores), "median": median(scores), "min": min(scores) if scores else None, "max": max(scores) if scores else None},
             "near_miss": {f"within_{points}": len([score for score in scores if 0 <= threshold - score <= points]) for points in (1, 2, 3, 4, 5)},
             "by_ticker": Counter(str(row["ticker"]) for row in rejected).most_common(10),
             "by_sector": Counter(SECTOR_BY_TICKER.get(str(row["ticker"]).upper(), "Unknown") for row in rejected).most_common(10),
             "by_market_regime": Counter(str(load_json_dict(row["raw_metrics_json"]).get("regime", "unknown")) for row in rejected).most_common(10),
             "by_time_bucket": time_groups.most_common(),
-            "note": "Rejected candidates are not labeled missed winners unless future price data exists separately.",
+            "note": "Verified v2 rows use actual blocking gates. Legacy labels are ambiguous and not used for research conclusions.",
         }
 
     def counterfactual(self, signals: list[ResearchSignal]) -> dict[str, Any]:
@@ -894,10 +910,14 @@ class ResearchReport:
     @staticmethod
     def rejection_lines(data: dict[str, Any]) -> list[str]:
         lines = ["Rejection analytics:"]
+        lines.append(f"- Verified v2 rows: {data['verified_v2_count']} legacy/ambiguous: {data['legacy_count']}")
         lines.append(f"- Score distribution: n={data['score_distribution']['count']} med={fmt(data['score_distribution']['median'])}")
         lines.append(f"- Near-miss: {data['near_miss']}")
-        lines.append(f"- First gates: {data['top_first_rejection_gates'][:5]}")
-        lines.append(f"- Reasons: {data['top_rejection_reasons'][:5]}")
+        lines.append(f"- Actual blocking gates: {data['top_actual_blocking_gates'][:5]}")
+        lines.append(f"- Failed conditions: {data['top_failed_conditions'][:5]}")
+        lines.append(f"- Passed conditions: {data['top_passed_conditions'][:5]}")
+        if data["legacy_rejection_labels"]:
+            lines.append(f"- Legacy rejection labels — condition result unavailable: {data['legacy_rejection_labels'][:5]}")
         lines.append(f"- Tickers: {data['by_ticker'][:5]}")
         lines.append(f"- Sectors: {data['by_sector'][:5]}")
         lines.append(f"- Regimes: {data['by_market_regime'][:5]}")
@@ -1179,6 +1199,19 @@ def decode_json_list(value: Any) -> list[Any]:
         return decoded if isinstance(decoded, list) else [decoded]
     except json.JSONDecodeError:
         return [str(value)]
+
+
+def row_version(row: Any) -> int:
+    try:
+        return int(row["diagnostics_format_version"] or 1)
+    except (KeyError, TypeError, ValueError):
+        return 1
+
+
+def condition_failure_display(condition: Any) -> str:
+    if isinstance(condition, dict):
+        return SignalDiagnosticsRecorder.failure_display(condition)
+    return str(condition)
 
 
 def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
