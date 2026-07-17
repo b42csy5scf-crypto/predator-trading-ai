@@ -3,6 +3,7 @@ import asyncio
 import os
 import subprocess
 import time
+import uuid
 from collections import Counter
 from datetime import datetime, time as dt_time, timedelta, timezone
 from typing import Optional
@@ -37,6 +38,7 @@ from predator_trading_ai.utils.watchlist import (
 EASTERN = ZoneInfo("America/New_York")
 MARKET_OPEN = dt_time(9, 30)
 MARKET_CLOSE = dt_time(16, 0)
+MARKET_CLOSED_HEARTBEAT_SECONDS = 60
 
 
 class PredatorTradingAI:
@@ -66,6 +68,7 @@ class PredatorTradingAI:
         self.circuit_breaker = CircuitBreaker(self.settings.watchdog_max_failures)
         self.state_store = RuntimeStateStore()
         self.state: RuntimeState = self.state_store.load()
+        self.process_instance_id = self.new_process_instance_id()
         self.scan_signals_generated = 0
         self.scan_signals_suppressed = 0
         self.scan_suppression_reasons: Counter[str] = Counter()
@@ -153,7 +156,7 @@ class PredatorTradingAI:
                 )
                 if run_once:
                     return
-                time.sleep(sleep_seconds)
+                self.sleep_market_closed_until_next_check()
                 continue
 
             if self.state.safe_mode:
@@ -218,6 +221,7 @@ class PredatorTradingAI:
         self.logger.info("Starting ActiveSignalTracker...")
         active_count = self.active_signal_tracker.active_count()
         timestamp = datetime.now(timezone.utc).isoformat()
+        self.db.set_state("tracker_process_instance_id", self.process_instance_id)
         self.db.set_state("tracker_started_at", timestamp)
         self.db.set_state("tracker_running", "true")
         self.db.set_state("tracker_active_signal_count", active_count)
@@ -226,6 +230,7 @@ class PredatorTradingAI:
         self.logger.info("Starting TP/SL monitor...")
         self.tp_sl_monitor_started = True
         monitor_timestamp = datetime.now(timezone.utc).isoformat()
+        self.db.set_state("tp_sl_monitor_process_instance_id", self.process_instance_id)
         self.db.set_state("tp_sl_monitor_heartbeat_utc", monitor_timestamp)
         self.db.set_state("tp_sl_monitor_heartbeat_at", monitor_timestamp)
         self.db.set_state("tp_sl_monitor_state", "IDLE" if active_count == 0 else "RUNNING")
@@ -242,12 +247,7 @@ class PredatorTradingAI:
             self.tp_sl_monitor_started = True
         active_tickers = self.active_signal_tracker.active_tickers()
         monitor_state = "IDLE" if not active_tickers else "RUNNING"
-        timestamp = datetime.now(timezone.utc).isoformat()
-        self.db.set_state("tp_sl_monitor_heartbeat_utc", timestamp)
-        self.db.set_state("tp_sl_monitor_heartbeat_at", timestamp)
-        self.db.set_state("tp_sl_monitor_state", monitor_state)
-        self.db.set_state("tp_sl_active_signal_count", len(active_tickers))
-        self.db.set_state("tracker_active_signal_count", len(active_tickers))
+        self.record_tp_sl_monitor_heartbeat(monitor_state, len(active_tickers))
         self.logger.info("TP/SL monitor running. active_tickers=%d", len(active_tickers))
         for ticker in active_tickers:
             try:
@@ -965,6 +965,7 @@ class PredatorTradingAI:
 
     def record_runtime_start(self) -> None:
         timestamp = datetime.now(timezone.utc).isoformat()
+        self.db.set_state("process_instance_id", self.process_instance_id)
         self.db.set_state("process_started_at", timestamp)
         self.db.set_state("runtime_revision", self.current_commit_hash())
 
@@ -975,10 +976,44 @@ class PredatorTradingAI:
         scan_cycle_status: str,
     ) -> None:
         timestamp = datetime.now(timezone.utc).isoformat()
+        self.db.set_state("main_loop_process_instance_id", self.process_instance_id)
         self.db.set_state("main_loop_heartbeat_at", timestamp)
         self.db.set_state("market_status", market_status)
         self.db.set_state("next_market_check_at", next_check_at.isoformat() if next_check_at else "")
         self.db.set_state("last_scan_cycle_status", scan_cycle_status)
+
+    def record_tp_sl_monitor_heartbeat(self, monitor_state: str, active_signal_count: int) -> None:
+        timestamp = datetime.now(timezone.utc).isoformat()
+        self.db.set_state("tp_sl_monitor_process_instance_id", self.process_instance_id)
+        self.db.set_state("tp_sl_monitor_heartbeat_utc", timestamp)
+        self.db.set_state("tp_sl_monitor_heartbeat_at", timestamp)
+        self.db.set_state("tp_sl_monitor_state", monitor_state)
+        self.db.set_state("tp_sl_active_signal_count", active_signal_count)
+        self.db.set_state("tracker_active_signal_count", active_signal_count)
+
+    def sleep_market_closed_until_next_check(self) -> None:
+        while True:
+            now = datetime.now(EASTERN)
+            if self.is_market_open(now):
+                return
+            remaining = self.seconds_until_next_open(now)
+            if remaining <= 0:
+                return
+            next_check = datetime.now(timezone.utc) + timedelta(seconds=remaining)
+            self.record_main_loop_status(
+                market_status="CLOSED",
+                next_check_at=next_check,
+                scan_cycle_status="market_closed_sleep",
+            )
+            active_count = self.active_signal_tracker.active_count()
+            self.record_tp_sl_monitor_heartbeat("IDLE" if active_count == 0 else "RUNNING", active_count)
+            time.sleep(min(MARKET_CLOSED_HEARTBEAT_SECONDS, remaining))
+
+    @staticmethod
+    def new_process_instance_id() -> str:
+        railway_replica = os.getenv("RAILWAY_REPLICA_ID") or os.getenv("RAILWAY_DEPLOYMENT_ID")
+        prefix = railway_replica or "local"
+        return f"{prefix}:{uuid.uuid4()}"
 
     def record_health(self, component: str, status: str, message: str) -> None:
         event = self.health.record(component, status, message)
