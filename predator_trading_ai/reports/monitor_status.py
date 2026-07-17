@@ -86,8 +86,13 @@ class MonitorStatusReport:
             return Section(name, ["- Healthy: UNKNOWN", "- Error: status query failed"], "UNKNOWN")
 
     def scanner_section(self) -> Section:
-        heartbeat = self.db_state("heartbeat_utc")
-        last_scan_state = self.runtime_last_scan_time()
+        process_started = self.db_state("process_started_at")
+        main_heartbeat = self.db_state("main_loop_heartbeat_at") or self.db_state("heartbeat_utc")
+        market_status = (self.db_state("market_status") or "UNKNOWN").upper()
+        next_check = self.db_state("next_market_check_at")
+        next_check_age = seconds_until(next_check, self.now)
+        last_completed_scan = self.current_process_timestamp(self.db_state("last_completed_scan_at"), process_started)
+        last_scan_state = self.current_process_timestamp(self.runtime_last_scan_time(), process_started)
         last_snapshot = self.one(
             """
             SELECT *
@@ -104,27 +109,36 @@ class MonitorStatusReport:
             """,
             default=0,
         )
-        last_ts = row_get(last_snapshot, "timestamp") or last_scan_state or heartbeat
-        seconds = age_seconds(last_ts, self.now)
-        running = self.running_label(seconds, allow_unknown=last_ts is None)
-        status = self.freshness_status(seconds)
+        last_snapshot_ts = self.current_process_timestamp(row_get(last_snapshot, "timestamp"), process_started)
+        last_scan = last_completed_scan or last_snapshot_ts or last_scan_state
+        main_age = age_seconds(main_heartbeat, self.now)
+        scan_age = age_seconds(last_scan, self.now)
+        status = self.scanner_status(market_status, main_age, scan_age, next_check_age)
         if status == "ERROR":
-            self.errors.append("Scanner heartbeat is stale.")
+            if self.freshness_status(main_age) == "ERROR":
+                self.errors.append("Main-loop heartbeat is stale.")
+            else:
+                self.errors.append("Completed scans are overdue while market is open.")
             self.warnings.append("No completed scan within the expected interval.")
         elif status == "WARNING":
             self.warnings.append("Scanner heartbeat is delayed.")
-        self.heartbeat_items.append(f"- Scanner: {age_label(seconds)} {status_icon(status)}")
+        running = self.scanner_running_label(market_status, status, next_check_age)
+        self.heartbeat_items.append(f"- Scanner: {age_label(main_age)} {status_icon(status)}")
         total_symbols = len(parse_watchlist(self.settings.watchlist))
         return Section(
             "Scanner",
             [
                 f"- Running: {running}",
-                f"- Last scan: {last_ts or 'never / unknown'}",
-                f"- Seconds since last scan: {seconds_label(seconds)}",
+                f"- Main-loop heartbeat: {age_label(main_age)}",
+                f"- Last completed scan: {last_scan or 'n/a for current process'}",
+                f"- Seconds since completed scan: {seconds_label(scan_age)}",
+                f"- Market status: {market_status}",
+                f"- Next market check: {next_check or 'n/a'}",
+                f"- Seconds until next check: {seconds_until_label(next_check_age)}",
                 f"- Configured scan interval: {self.scan_interval}s",
                 f"- Symbols scanned last cycle: {row_get(last_snapshot, 'symbols_scanned', 'n/a')}",
                 f"- Total configured symbols: {total_symbols}",
-                f"- Last scan cycle status: {self.scan_status(last_snapshot)}",
+                f"- Last scan cycle status: {self.db_state('last_scan_cycle_status') or self.scan_status(last_snapshot)}",
                 f"- Scan cycles today: {today}",
                 f"- Last API/data failures: {self.failure_count(last_snapshot)}",
             ],
@@ -149,10 +163,11 @@ class MonitorStatusReport:
             """,
             default=0,
         )
-        heartbeat = self.db_state("tp_sl_monitor_heartbeat_utc")
+        heartbeat = self.db_state("tp_sl_monitor_heartbeat_at") or self.db_state("tp_sl_monitor_heartbeat_utc")
+        monitor_state = (self.db_state("tp_sl_monitor_state") or "").upper()
         monitor_age = age_seconds(heartbeat, self.now)
         monitor_status = self.freshness_status(monitor_age)
-        running = "IDLE" if active_total == 0 and monitor_status in {"HEALTHY", "UNKNOWN"} else self.running_label(monitor_age, heartbeat is None)
+        running = "IDLE" if active_total == 0 and monitor_status == "HEALTHY" else monitor_state or self.running_label(monitor_age, heartbeat is None)
         if active_total > 0 and monitor_status == "ERROR":
             self.errors.append("TP/SL monitor is stale while active signals exist.")
             self.warnings.append("TP/SL monitor heartbeat is delayed.")
@@ -202,15 +217,18 @@ class MonitorStatusReport:
         completed_today = self.scalar("SELECT COUNT(*) AS count FROM completed_trades WHERE date(created_at) = date('now')", default=0)
         last_added = self.scalar("SELECT MAX(created_at) AS value FROM active_signals", default=None)
         last_removed = self.one("SELECT closed_at, close_reason FROM active_signals WHERE closed_at IS NOT NULL ORDER BY closed_at DESC LIMIT 1")
-        heartbeat = self.db_state("tp_sl_monitor_heartbeat_utc")
+        tracker_started = self.db_state("tracker_started_at")
+        tracker_running = (self.db_state("tracker_running") or "").lower() == "true"
+        heartbeat = tracker_started or self.db_state("tp_sl_monitor_heartbeat_at") or self.db_state("tp_sl_monitor_heartbeat_utc")
         age = age_seconds(heartbeat, self.now)
-        status = self.freshness_status(age)
-        running = "YES" if status == "HEALTHY" else "UNKNOWN" if status == "UNKNOWN" else "NO"
+        status = "HEALTHY" if tracker_running else self.freshness_status(age)
+        running = "YES" if tracker_running or status == "HEALTHY" else "UNKNOWN" if status == "UNKNOWN" else "NO"
         return Section(
             "ActiveSignalTracker",
             [
                 f"- Running: {running}",
                 f"- Active signals: {active}",
+                f"- Tracker started: {tracker_started or 'n/a'}",
                 f"- Signals added today: {added_today}",
                 f"- Signals removed today: {removed_today}",
                 f"- Completed trades today: {completed_today}",
@@ -321,9 +339,42 @@ class MonitorStatusReport:
     def overall_status(self, sections: list[Section]) -> str:
         if self.errors or any(section.status == "ERROR" for section in sections if section.name != "Telegram"):
             return "❌ ERROR"
-        if self.warnings or any(section.status == "WARNING" for section in sections):
+        degrading_warnings = [warning for warning in self.warnings if not self.is_informational_warning(warning)]
+        if degrading_warnings or any(section.status == "WARNING" for section in sections):
             return "⚠️ WARNING"
         return "✅ HEALTHY"
+
+    @staticmethod
+    def is_informational_warning(warning: str) -> bool:
+        return warning.startswith("No active signals currently exist")
+
+    def scanner_status(
+        self,
+        market_status: str,
+        main_age: Optional[float],
+        scan_age: Optional[float],
+        next_check_seconds: Optional[float],
+    ) -> str:
+        main_status = self.freshness_status(main_age)
+        if market_status == "CLOSED" and next_check_seconds is not None and next_check_seconds >= 0:
+            return "HEALTHY" if main_status != "ERROR" else "WARNING"
+        if main_status == "ERROR":
+            return "ERROR"
+        if market_status == "OPEN" and self.freshness_status(scan_age) == "ERROR":
+            return "ERROR"
+        if main_status == "WARNING":
+            return "WARNING"
+        return "HEALTHY"
+
+    @staticmethod
+    def scanner_running_label(market_status: str, status: str, next_check_seconds: Optional[float]) -> str:
+        if market_status == "CLOSED" and next_check_seconds is not None and next_check_seconds >= 0:
+            return "IDLE / MARKET CLOSED"
+        if status == "HEALTHY":
+            return "YES"
+        if status == "WARNING":
+            return "UNKNOWN"
+        return "NO"
 
     def freshness_status(self, seconds: Optional[float]) -> str:
         if seconds is None:
@@ -450,6 +501,15 @@ class MonitorStatusReport:
         except Exception:
             return None
 
+    def current_process_timestamp(self, value: Any, process_started: Any) -> Optional[str]:
+        if not value:
+            return None
+        started = parse_timestamp(process_started)
+        timestamp = parse_timestamp(value)
+        if started is not None and timestamp is not None and timestamp < started:
+            return None
+        return str(value)
+
     def git_commit(self) -> str:
         for key in ("RAILWAY_GIT_COMMIT_SHA", "RAILWAY_GIT_COMMIT", "SOURCE_COMMIT", "GIT_COMMIT_SHA"):
             value = os.getenv(key)
@@ -520,8 +580,19 @@ def age_seconds(value: Any, now: datetime) -> Optional[float]:
     return max((now - parsed).total_seconds(), 0.0)
 
 
+def seconds_until(value: Any, now: datetime) -> Optional[float]:
+    parsed = parse_timestamp(value)
+    if parsed is None:
+        return None
+    return (parsed - now).total_seconds()
+
+
 def seconds_label(value: Optional[float]) -> str:
     return "unknown" if value is None else f"{int(value)}"
+
+
+def seconds_until_label(value: Optional[float]) -> str:
+    return "unknown" if value is None else f"{max(int(value), 0)}"
 
 
 def age_label(value: Optional[float]) -> str:

@@ -12,6 +12,10 @@ def iso_ago(seconds: int) -> str:
     return (datetime.now(timezone.utc) - timedelta(seconds=seconds)).isoformat()
 
 
+def iso_ahead(seconds: int) -> str:
+    return (datetime.now(timezone.utc) + timedelta(seconds=seconds)).isoformat()
+
+
 def make_db(tmp_path) -> Database:
     settings = Settings(database_url=f"sqlite:///{tmp_path / 'monitor.db'}")
     db = Database(settings)
@@ -37,7 +41,17 @@ def table_counts(db: Database) -> dict[str, int]:
 def seed_healthy(db: Database) -> None:
     now = iso_ago(10)
     db.set_state("heartbeat_utc", now)
+    db.set_state("process_started_at", iso_ago(60))
+    db.set_state("main_loop_heartbeat_at", now)
+    db.set_state("market_status", "OPEN")
+    db.set_state("next_market_check_at", iso_ahead(300))
+    db.set_state("last_completed_scan_at", now)
+    db.set_state("last_scan_cycle_status", "completed")
     db.set_state("tp_sl_monitor_heartbeat_utc", now)
+    db.set_state("tp_sl_monitor_heartbeat_at", now)
+    db.set_state("tp_sl_monitor_state", "RUNNING")
+    db.set_state("tracker_started_at", now)
+    db.set_state("tracker_running", "true")
     db.execute(
         """
         INSERT INTO universe_snapshot (
@@ -122,7 +136,10 @@ def test_monitor_status_fully_healthy_runtime(tmp_path) -> None:
 
 def test_monitor_status_scanner_heartbeat_stale(tmp_path) -> None:
     db = make_db(tmp_path)
-    db.set_state("heartbeat_utc", iso_ago(2000))
+    db.set_state("process_started_at", iso_ago(3000))
+    db.set_state("main_loop_heartbeat_at", iso_ago(2000))
+    db.set_state("market_status", "OPEN")
+    db.set_state("last_completed_scan_at", iso_ago(2000))
     db.execute(
         """
         INSERT INTO universe_snapshot (
@@ -143,6 +160,7 @@ def test_monitor_status_tp_sl_stale_with_active_signals(tmp_path) -> None:
     db = make_db(tmp_path)
     seed_healthy(db)
     db.set_state("tp_sl_monitor_heartbeat_utc", iso_ago(2000))
+    db.set_state("tp_sl_monitor_heartbeat_at", iso_ago(2000))
 
     report = MonitorStatusReport(Settings(database_url=f"sqlite:///{tmp_path / 'monitor.db'}", loop_interval_seconds=300), db).build()
 
@@ -154,7 +172,12 @@ def test_monitor_status_tp_sl_idle_with_zero_active_signals(tmp_path) -> None:
     db = make_db(tmp_path)
     now = iso_ago(10)
     db.set_state("heartbeat_utc", now)
+    db.set_state("main_loop_heartbeat_at", now)
+    db.set_state("market_status", "OPEN")
+    db.set_state("last_completed_scan_at", now)
     db.set_state("tp_sl_monitor_heartbeat_utc", now)
+    db.set_state("tp_sl_monitor_heartbeat_at", now)
+    db.set_state("tp_sl_monitor_state", "IDLE")
 
     report = MonitorStatusReport(Settings(database_url=f"sqlite:///{tmp_path / 'monitor.db'}"), db).build()
 
@@ -238,3 +261,96 @@ def test_monitor_status_command_is_read_only(tmp_path) -> None:
     MonitorStatusReport(Settings(database_url=f"sqlite:///{tmp_path / 'monitor.db'}"), db).build()
 
     assert table_counts(db) == before
+
+
+def test_monitor_status_market_closed_recent_main_loop_is_healthy(tmp_path) -> None:
+    db = make_db(tmp_path)
+    now = iso_ago(30)
+    db.set_state("process_started_at", iso_ago(120))
+    db.set_state("main_loop_heartbeat_at", now)
+    db.set_state("market_status", "CLOSED")
+    db.set_state("next_market_check_at", iso_ahead(3600))
+    db.set_state("last_scan_cycle_status", "market_closed_sleep")
+    db.set_state("tp_sl_monitor_heartbeat_at", now)
+    db.set_state("tp_sl_monitor_state", "IDLE")
+    db.set_state("tracker_started_at", now)
+    db.set_state("tracker_running", "true")
+
+    report = MonitorStatusReport(Settings(database_url=f"sqlite:///{tmp_path / 'monitor.db'}", loop_interval_seconds=300), db).build()
+
+    assert "Status: ✅ HEALTHY" in report
+    assert "Running: IDLE / MARKET CLOSED" in report
+    assert "Market status: CLOSED" in report
+    assert "No completed scan within the expected interval." not in report
+
+
+def test_monitor_status_ignores_old_scan_from_previous_process(tmp_path) -> None:
+    db = make_db(tmp_path)
+    now = iso_ago(20)
+    db.set_state("process_started_at", iso_ago(60))
+    db.set_state("main_loop_heartbeat_at", now)
+    db.set_state("market_status", "CLOSED")
+    db.set_state("next_market_check_at", iso_ahead(3600))
+    db.set_state("last_completed_scan_at", "2026-05-22T19:58:11.866216+00:00")
+    db.set_state("tp_sl_monitor_heartbeat_at", now)
+    db.set_state("tp_sl_monitor_state", "IDLE")
+    db.set_state("tracker_started_at", now)
+    db.set_state("tracker_running", "true")
+
+    report = MonitorStatusReport(Settings(database_url=f"sqlite:///{tmp_path / 'monitor.db'}", loop_interval_seconds=300), db).build()
+
+    assert "Last completed scan: n/a for current process" in report
+    assert "Running: IDLE / MARKET CLOSED" in report
+
+
+def test_monitor_status_market_open_overdue_scan_is_error(tmp_path) -> None:
+    db = make_db(tmp_path)
+    db.set_state("process_started_at", iso_ago(3000))
+    db.set_state("main_loop_heartbeat_at", iso_ago(20))
+    db.set_state("market_status", "OPEN")
+    db.set_state("last_completed_scan_at", iso_ago(2000))
+    db.set_state("tp_sl_monitor_heartbeat_at", iso_ago(20))
+    db.set_state("tp_sl_monitor_state", "IDLE")
+    db.set_state("tracker_started_at", iso_ago(20))
+    db.set_state("tracker_running", "true")
+
+    report = MonitorStatusReport(Settings(database_url=f"sqlite:///{tmp_path / 'monitor.db'}", loop_interval_seconds=300), db).build()
+
+    assert "Status: ❌ ERROR" in report
+    assert "No completed scan within the expected interval." in report
+
+
+def test_monitor_status_tracker_started_with_zero_signals_is_running(tmp_path) -> None:
+    db = make_db(tmp_path)
+    now = iso_ago(10)
+    db.set_state("process_started_at", iso_ago(30))
+    db.set_state("main_loop_heartbeat_at", now)
+    db.set_state("market_status", "CLOSED")
+    db.set_state("next_market_check_at", iso_ahead(3600))
+    db.set_state("tp_sl_monitor_heartbeat_at", now)
+    db.set_state("tp_sl_monitor_state", "IDLE")
+    db.set_state("tracker_started_at", now)
+    db.set_state("tracker_running", "true")
+
+    report = MonitorStatusReport(Settings(database_url=f"sqlite:///{tmp_path / 'monitor.db'}"), db).build()
+
+    assert "ActiveSignalTracker" in report
+    assert "- Running: YES" in report
+    assert "- Active signals: 0" in report
+
+
+def test_monitor_status_no_price_path_with_zero_active_signals_is_not_warning(tmp_path) -> None:
+    db = make_db(tmp_path)
+    now = iso_ago(10)
+    db.set_state("process_started_at", iso_ago(30))
+    db.set_state("main_loop_heartbeat_at", now)
+    db.set_state("market_status", "CLOSED")
+    db.set_state("next_market_check_at", iso_ahead(3600))
+    db.set_state("tp_sl_monitor_heartbeat_at", now)
+    db.set_state("tp_sl_monitor_state", "IDLE")
+    db.set_state("tracker_started_at", now)
+    db.set_state("tracker_running", "true")
+
+    report = MonitorStatusReport(Settings(database_url=f"sqlite:///{tmp_path / 'monitor.db'}"), db).build()
+
+    assert "Active signals exist but price updates are stale." not in report
