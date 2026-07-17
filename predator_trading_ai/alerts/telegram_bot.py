@@ -138,7 +138,7 @@ class TelegramAlertBot:
             return
         command = str(message.text).strip().split()[0].split("@")[0]
         research_commands = {"/research_report": 30, "/research_report_7d": 7, "/research_report_30d": 30}
-        if command not in {"/report", "/diagnostics_report", "/monitor_status", *research_commands}:
+        if command not in {"/report", "/diagnostics_report", "/monitor_status", "/health", *research_commands}:
             return
         chat_id = str(update.effective_chat.id) if getattr(update, "effective_chat", None) else ""
         if chat_id not in self.configured_chat_ids():
@@ -152,6 +152,16 @@ class TelegramAlertBot:
                 await bot.send_message(
                     chat_id=chat_id,
                     text="Monitor status generated, but Telegram recipients are not configured.",
+                )
+            return
+        if command == "/health":
+            from predator_trading_ai.reports.health_report_runner import HealthReportRunner
+
+            result = await HealthReportRunner(self.settings, self.db).build_and_send()
+            if not result.sent:
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text="Health report generated, but Telegram recipients are not configured.",
                 )
             return
         if command in research_commands:

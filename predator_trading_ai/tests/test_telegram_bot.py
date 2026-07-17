@@ -350,3 +350,39 @@ def test_monitor_status_command_is_handled_without_application_polling(monkeypat
     asyncio.run(bot.handle_command_update(FakeBot(), update))
 
     assert sent == []
+
+
+def test_health_command_is_handled_without_application_polling(monkeypatch) -> None:
+    sent: list[tuple[str, str]] = []
+
+    class FakeMessage:
+        text = "/health"
+
+    update = type(
+        "FakeUpdate",
+        (),
+        {
+            "message": FakeMessage(),
+            "effective_chat": type("FakeChat", (), {"id": "123"})(),
+        },
+    )()
+
+    class FakeBot:
+        async def send_message(self, chat_id, text):
+            sent.append((chat_id, text))
+
+    class FakeRunner:
+        def __init__(self, settings, db):
+            pass
+
+        async def build_and_send(self):
+            return type("Result", (), {"sent": True})()
+
+    import predator_trading_ai.reports.health_report_runner as health_report_runner
+
+    monkeypatch.setattr(health_report_runner, "HealthReportRunner", FakeRunner)
+    bot = TelegramAlertBot(Settings(telegram_bot_token="token", telegram_chat_id="123"))
+
+    asyncio.run(bot.handle_command_update(FakeBot(), update))
+
+    assert sent == []
