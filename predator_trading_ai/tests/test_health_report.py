@@ -33,7 +33,7 @@ def test_health_report_fully_healthy_runtime(tmp_path) -> None:
     telegram_module.TELEGRAM_POLLING_STARTED = False
 
 
-def test_health_report_market_closed_idle_is_warning(tmp_path) -> None:
+def test_health_report_market_closed_idle_with_zero_active_signals_is_healthy(tmp_path) -> None:
     db = make_db(tmp_path)
     now = iso_ago(10)
     seed_process_ids(db)
@@ -50,10 +50,58 @@ def test_health_report_market_closed_idle_is_warning(tmp_path) -> None:
 
     report = HealthReport(settings, db).build()
 
-    assert "⚠️ WARNING" in report
+    assert "✅ HEALTHY" in report
     assert "- Running: IDLE / MARKET CLOSED" in report
     assert "- Active monitored signals: 0" in report
     telegram_module.TELEGRAM_POLLING_STARTED = False
+
+
+def test_health_report_market_open_delayed_scanner_is_warning(tmp_path) -> None:
+    db = make_db(tmp_path)
+    seed_process_ids(db)
+    db.set_state("process_started_at", iso_ago(600))
+    db.set_state("main_loop_heartbeat_at", iso_ago(200))
+    db.set_state("market_status", "OPEN")
+    db.set_state("last_completed_scan_at", iso_ago(20))
+    db.set_state("tp_sl_monitor_heartbeat_at", iso_ago(20))
+    db.set_state("tp_sl_monitor_state", "IDLE")
+    db.set_state("tracker_started_at", iso_ago(20))
+    db.set_state("tracker_running", "true")
+    telegram_module.TELEGRAM_POLLING_STARTED = True
+
+    report = HealthReport(make_settings(tmp_path, telegram_bot_token="token", telegram_chat_id="123"), db).build()
+
+    assert "⚠️ WARNING" in report
+    telegram_module.TELEGRAM_POLLING_STARTED = False
+
+
+def test_health_report_stale_tp_sl_with_active_signals_is_error(tmp_path) -> None:
+    db = make_db(tmp_path)
+    seed_healthy(db)
+    db.set_state("process_started_at", iso_ago(1200))
+    db.set_state("tp_sl_monitor_heartbeat_at", iso_ago(400))
+    db.set_state("tp_sl_monitor_heartbeat_utc", iso_ago(400))
+    telegram_module.TELEGRAM_POLLING_STARTED = True
+
+    report = HealthReport(make_settings(tmp_path, telegram_bot_token="token", telegram_chat_id="123"), db).build()
+
+    assert "❌ ERROR" in report
+    telegram_module.TELEGRAM_POLLING_STARTED = False
+
+
+def test_health_report_telegram_conflict_is_warning_not_crash(tmp_path) -> None:
+    db = make_db(tmp_path)
+    seed_healthy(db)
+    telegram_module.TELEGRAM_POLLING_STARTED = False
+    telegram_module.TELEGRAM_POLLING_SKIPPED_REASON = "conflict_detected"
+    telegram_module.TELEGRAM_POLLING_DISABLED_REASON = "terminated by other getUpdates request"
+
+    report = HealthReport(make_settings(tmp_path, telegram_bot_token="token", telegram_chat_id="123"), db).build()
+
+    assert "⚠️ WARNING" in report
+    assert "- Conflict status: YES" in report
+    telegram_module.TELEGRAM_POLLING_SKIPPED_REASON = "not_started"
+    telegram_module.TELEGRAM_POLLING_DISABLED_REASON = None
 
 
 def test_health_report_database_unavailable_is_error() -> None:

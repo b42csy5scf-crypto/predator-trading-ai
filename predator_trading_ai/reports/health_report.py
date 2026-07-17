@@ -55,25 +55,31 @@ class HealthReport:
             return "ERROR"
         if sections["Scanner"].status == "ERROR":
             return "ERROR"
-        if self.telegram_polling_dead(sections["Telegram"]):
+        if sections["ActiveSignalTracker"].status in {"ERROR", "UNKNOWN"}:
+            return "ERROR"
+        telegram_status = self.telegram_runtime_status(sections["Telegram"])
+        if telegram_status == "ERROR":
             return "ERROR"
         if any(section.status == "ERROR" for section in sections.values() if section.name != "Telegram"):
             return "ERROR"
         if sections["Scanner"].status == "WARNING" or sections["TP/SL Monitor"].status == "WARNING":
             return "WARNING"
-        if self.value(sections["Scanner"], "- Running:") == "IDLE / MARKET CLOSED":
-            return "WARNING"
-        if self.value(sections["TP/SL Monitor"], "- Active monitored signals:") == "0":
-            return "WARNING"
-        if sections["Telegram"].status == "WARNING":
+        if telegram_status == "WARNING":
             return "WARNING"
         return "HEALTHY"
 
-    def telegram_polling_dead(self, section: Section) -> bool:
+    def telegram_runtime_status(self, section: Section) -> str:
+        send_enabled = self.value(section, "- sendMessage enabled:") == "YES"
         enabled = self.value(section, "- Command polling enabled:") == "YES"
         started = self.value(section, "- Command polling started:") == "YES"
         conflict = self.value(section, "- Command polling disabled after Conflict:") == "YES"
-        return enabled and (conflict or not started)
+        if not send_enabled:
+            return "WARNING"
+        if not enabled or conflict:
+            return "WARNING"
+        if enabled and not started and telegram_module.TELEGRAM_POLLING_SKIPPED_REASON != "duplicate_startup":
+            return "ERROR"
+        return "HEALTHY"
 
     def scanner_lines(self, section: Section) -> list[str]:
         return [
