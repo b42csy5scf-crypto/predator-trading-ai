@@ -386,3 +386,73 @@ def test_health_command_is_handled_without_application_polling(monkeypatch) -> N
     asyncio.run(bot.handle_command_update(FakeBot(), update))
 
     assert sent == []
+
+
+def test_rejected_examples_command_is_handled_without_application_polling(monkeypatch) -> None:
+    sent: list[tuple[str, str]] = []
+    limits_seen: list[int] = []
+
+    class FakeBot:
+        async def send_message(self, chat_id, text):
+            sent.append((chat_id, text))
+
+    class FakeRunner:
+        def __init__(self, settings, db):
+            pass
+
+        async def send_rejected_examples(self, limit=10):
+            limits_seen.append(limit)
+            return type("Result", (), {"sent": True})()
+
+    import predator_trading_ai.reports.rejection_insights_runner as rejection_insights_runner
+
+    monkeypatch.setattr(rejection_insights_runner, "RejectionInsightsRunner", FakeRunner)
+    bot = TelegramAlertBot(Settings(telegram_bot_token="token", telegram_chat_id="123"))
+    update = type(
+        "FakeUpdate",
+        (),
+        {
+            "message": type("FakeMessage", (), {"text": "/rejected_examples 20"})(),
+            "effective_chat": type("FakeChat", (), {"id": "123"})(),
+        },
+    )()
+
+    asyncio.run(bot.handle_command_update(FakeBot(), update))
+
+    assert limits_seen == [20]
+    assert sent == []
+
+
+def test_score_distribution_command_is_handled_without_application_polling(monkeypatch) -> None:
+    sent: list[tuple[str, str]] = []
+    periods_seen: list[str] = []
+
+    class FakeBot:
+        async def send_message(self, chat_id, text):
+            sent.append((chat_id, text))
+
+    class FakeRunner:
+        def __init__(self, settings, db):
+            pass
+
+        async def send_score_distribution(self, period="today"):
+            periods_seen.append(period)
+            return type("Result", (), {"sent": True})()
+
+    import predator_trading_ai.reports.rejection_insights_runner as rejection_insights_runner
+
+    monkeypatch.setattr(rejection_insights_runner, "RejectionInsightsRunner", FakeRunner)
+    bot = TelegramAlertBot(Settings(telegram_bot_token="token", telegram_chat_id="123"))
+    update = type(
+        "FakeUpdate",
+        (),
+        {
+            "message": type("FakeMessage", (), {"text": "/score_distribution 7d"})(),
+            "effective_chat": type("FakeChat", (), {"id": "123"})(),
+        },
+    )()
+
+    asyncio.run(bot.handle_command_update(FakeBot(), update))
+
+    assert periods_seen == ["7d"]
+    assert sent == []

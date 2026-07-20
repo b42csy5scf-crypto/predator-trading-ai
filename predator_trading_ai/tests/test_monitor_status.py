@@ -156,6 +156,17 @@ def test_monitor_status_fully_healthy_runtime(tmp_path) -> None:
     assert "secret-chat" not in report
 
 
+def test_monitor_status_lists_rejection_insight_commands(tmp_path) -> None:
+    db = make_db(tmp_path)
+    seed_healthy(db)
+    settings = make_settings(tmp_path, telegram_bot_token="secret-token", telegram_chat_id="secret-chat")
+
+    report = MonitorStatusReport(settings, db).build()
+
+    assert "/rejected_examples" in report
+    assert "/score_distribution" in report
+
+
 def test_monitor_status_scanner_heartbeat_stale(tmp_path) -> None:
     db = make_db(tmp_path)
     seed_process_ids(db)

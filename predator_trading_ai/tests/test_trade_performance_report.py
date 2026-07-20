@@ -1,4 +1,5 @@
 import subprocess
+import sys
 
 from predator_trading_ai.alerts.telegram_bot import TelegramAlertBot
 from predator_trading_ai.config import Settings
@@ -253,7 +254,7 @@ def test_run_performance_report_command(tmp_path) -> None:
     Database(settings).initialize()
     result = subprocess.run(
         [
-            "predator_trading_ai/.venv/bin/python",
+            sys.executable,
             "-m",
             "predator_trading_ai.run_performance_report",
         ],

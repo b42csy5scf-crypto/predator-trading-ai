@@ -1,4 +1,5 @@
 import subprocess
+import sys
 
 from predator_trading_ai.config import Settings
 from predator_trading_ai.database.db import Database
@@ -231,7 +232,7 @@ def test_run_diagnostics_report_command(tmp_path) -> None:
     Database(settings).initialize()
     result = subprocess.run(
         [
-            "predator_trading_ai/.venv/bin/python",
+            sys.executable,
             "-m",
             "predator_trading_ai.run_diagnostics_report",
             "--days",

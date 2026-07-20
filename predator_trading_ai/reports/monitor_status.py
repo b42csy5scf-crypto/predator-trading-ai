@@ -29,6 +29,9 @@ COMMANDS = (
     "/research_report_7d",
     "/research_report_30d",
     "/monitor_status",
+    "/health",
+    "/rejected_examples",
+    "/score_distribution",
 )
 
 
