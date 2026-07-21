@@ -656,7 +656,13 @@ class ResearchReport:
         failed_conditions = Counter()
         passed_conditions = Counter()
         legacy_labels = Counter()
+        eligibility_status = Counter()
+        setup_grades = Counter()
+        final_status = Counter()
         for row in verified:
+            eligibility_status[str(row_get(row, "eligibility_status") or "legacy/unavailable")] += 1
+            setup_grades[str(row_get(row, "setup_grade") or row_get(row, "computed_grade") or "unknown")] += 1
+            final_status[str(row_get(row, "final_acceptance_status") or "REJECTED")] += 1
             for condition in decode_json_list(row_get(row, "failed_conditions_v2_json")):
                 failed_conditions[condition_failure_display(condition)] += 1
             for condition in decode_json_list(row_get(row, "passed_conditions_v2_json")):
@@ -675,6 +681,9 @@ class ResearchReport:
             "top_failed_conditions": failed_conditions.most_common(10),
             "top_passed_conditions": passed_conditions.most_common(10),
             "top_rejection_reasons": failed_conditions.most_common(10),
+            "eligibility_status_counts": eligibility_status.most_common(10),
+            "setup_grade_counts": setup_grades.most_common(10),
+            "final_acceptance_status_counts": final_status.most_common(10),
             "legacy_rejection_labels": legacy_labels.most_common(10),
             "score_distribution": {"count": len(scores), "median": median(scores), "min": min(scores) if scores else None, "max": max(scores) if scores else None},
             "near_miss": {f"within_{points}": len([score for score in scores if 0 <= threshold - score <= points]) for points in (1, 2, 3, 4, 5)},
@@ -914,6 +923,9 @@ class ResearchReport:
         lines.append(f"- Score distribution: n={data['score_distribution']['count']} med={fmt(data['score_distribution']['median'])}")
         lines.append(f"- Near-miss: {data['near_miss']}")
         lines.append(f"- Actual blocking gates: {data['top_actual_blocking_gates'][:5]}")
+        lines.append(f"- Eligibility status: {data.get('eligibility_status_counts', [])[:5]}")
+        lines.append(f"- Setup grades before policy: {data.get('setup_grade_counts', [])[:5]}")
+        lines.append(f"- Final acceptance status: {data.get('final_acceptance_status_counts', [])[:5]}")
         lines.append(f"- Failed conditions: {data['top_failed_conditions'][:5]}")
         lines.append(f"- Passed conditions: {data['top_passed_conditions'][:5]}")
         if data["legacy_rejection_labels"]:

@@ -18,6 +18,12 @@ class MarketSnapshot:
     volume: int
     vwap: Optional[float]
     timestamp: datetime
+    bid_size: Optional[int] = None
+    ask_size: Optional[int] = None
+    quote_timestamp: Optional[datetime] = None
+    data_source: Optional[str] = None
+    feed_name: Optional[str] = None
+    feed_type: Optional[str] = None
 
 
 class MarketDataClient:
@@ -101,12 +107,29 @@ class MarketDataClient:
             trade = trades[ticker] if isinstance(trades, dict) else trades
             bid = float(getattr(quote, "bid_price", 0) or 0) or None
             ask = float(getattr(quote, "ask_price", 0) or 0) or None
+            bid_size = int(getattr(quote, "bid_size", 0) or 0) or None
+            ask_size = int(getattr(quote, "ask_size", 0) or 0) or None
             price = float(getattr(trade, "price", 0) or 0)
             size = int(getattr(trade, "size", 0) or 0)
             timestamp = getattr(trade, "timestamp", datetime.now(timezone.utc))
+            quote_timestamp = getattr(quote, "timestamp", None)
             if price <= 0:
                 return None
-            return MarketSnapshot(ticker, price, bid, ask, size, None, timestamp)
+            return MarketSnapshot(
+                ticker,
+                price,
+                bid,
+                ask,
+                size,
+                None,
+                timestamp,
+                bid_size=bid_size,
+                ask_size=ask_size,
+                quote_timestamp=quote_timestamp,
+                data_source="alpaca",
+                feed_name="IEX",
+                feed_type="feed_native",
+            )
         except Exception as exc:
             self.logger.exception("Failed to fetch latest snapshot for %s: %s", ticker, exc)
             return self._get_yfinance_snapshot(ticker)
@@ -241,6 +264,10 @@ class MarketDataClient:
             volume=int(latest.get("volume", 0) or 0),
             vwap=None,
             timestamp=timestamp,
+            quote_timestamp=timestamp,
+            data_source="yfinance",
+            feed_name="fallback",
+            feed_type="synthetic_quote",
         )
 
     def _normalize_ohlcv(

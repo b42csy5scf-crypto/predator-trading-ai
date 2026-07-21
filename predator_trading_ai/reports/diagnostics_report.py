@@ -214,9 +214,15 @@ class DiagnosticsReport:
         failed_conditions = Counter()
         passed_conditions = Counter()
         legacy_labels = Counter()
+        eligibility_status = Counter()
+        setup_grades = Counter()
+        final_status = Counter()
         for row in verified:
             gate = self.row_get(row, "actual_first_blocking_gate") or row["first_rejection_gate"] or "unknown"
             blocking_gates[str(gate)] += 1
+            eligibility_status[str(self.row_get(row, "eligibility_status") or "legacy/unavailable")] += 1
+            setup_grades[str(self.row_get(row, "setup_grade") or row["computed_grade"] or "unknown")] += 1
+            final_status[str(self.row_get(row, "final_acceptance_status") or "REJECTED")] += 1
             for condition in self.decode_json_list(self.row_get(row, "failed_conditions_v2_json")):
                 failed_conditions[self.failure_display(condition)] += 1
             for condition in self.decode_json_list(self.row_get(row, "passed_conditions_v2_json")):
@@ -231,6 +237,12 @@ class DiagnosticsReport:
             "Top actual blocking gates:",
         ]
         lines.extend(self.counter_lines(blocking_gates, 5))
+        lines.append("Eligibility status:")
+        lines.extend(self.counter_lines(eligibility_status, 5))
+        lines.append("Setup grades before policy:")
+        lines.extend(self.counter_lines(setup_grades, 5))
+        lines.append("Final acceptance status:")
+        lines.extend(self.counter_lines(final_status, 5))
         lines.append("Top failed conditions:")
         lines.extend(self.counter_lines(failed_conditions, 5))
         lines.append("Most common passed conditions:")

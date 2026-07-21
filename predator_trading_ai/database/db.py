@@ -57,8 +57,8 @@ TIMESTAMPTZ_COLUMNS = {
     "signal_updates": {"created_at"},
     "alert_daily_limits": {"last_alert_at"},
     "completed_trades": {"created_at", "updated_at", "opened_at", "closed_at"},
-    "signal_diagnostics": {"created_at"},
-    "rejected_candidate_diagnostics": {"created_at"},
+    "signal_diagnostics": {"created_at", "quote_timestamp", "evaluation_timestamp"},
+    "rejected_candidate_diagnostics": {"created_at", "quote_timestamp", "evaluation_timestamp"},
     "signal_outcome_diagnostics": {
         "created_at",
         "updated_at",
@@ -72,6 +72,53 @@ TIMESTAMPTZ_COLUMNS = {
     "universe_snapshot": {"created_at", "timestamp"},
     "config_snapshots": {"created_at"},
 }
+
+
+def classification_and_quote_columns() -> dict[str, str]:
+    return {
+        "raw_score": "REAL",
+        "setup_grade": "TEXT",
+        "eligibility_status": "TEXT",
+        "eligibility_stage": "TEXT",
+        "block_reason_code": "TEXT",
+        "block_reason_display": "TEXT",
+        "final_acceptance_status": "TEXT",
+        "displayed_grade_legacy": "TEXT",
+        "classification_format_version": "INTEGER NOT NULL DEFAULT 1",
+        "raw_bid": "REAL",
+        "raw_ask": "REAL",
+        "bid_size": "INTEGER",
+        "ask_size": "INTEGER",
+        "last_trade_price": "REAL",
+        "midpoint": "REAL",
+        "quote_timestamp": "TEXT",
+        "evaluation_timestamp": "TEXT",
+        "quote_age_seconds": "REAL",
+        "quote_source": "TEXT",
+        "feed_name": "TEXT",
+        "feed_type": "TEXT",
+        "nbbo_flag": "INTEGER",
+        "feed_native_flag": "INTEGER",
+        "spread_absolute": "REAL",
+        "spread_percentage": "REAL",
+        "spread_formula_version": "TEXT",
+        "liquidity_score_at_evaluation": "REAL",
+        "raw_volume": "REAL",
+        "quote_relative_volume": "REAL",
+        "market_session_state": "TEXT",
+        "market_status": "TEXT",
+        "retry_used": "INTEGER",
+        "stale_quote_flag": "INTEGER",
+        "missing_bid_flag": "INTEGER",
+        "missing_ask_flag": "INTEGER",
+        "nonpositive_bid_flag": "INTEGER",
+        "nonpositive_ask_flag": "INTEGER",
+        "crossed_market_flag": "INTEGER",
+        "raw_quote_payload_version": "TEXT",
+        "forensics_format_version": "INTEGER",
+        "quote_validity_status": "TEXT",
+        "quote_validity_reasons": "TEXT",
+    }
 
 
 class DatabaseConfigurationError(RuntimeError):
@@ -269,6 +316,7 @@ class Database:
             "day_of_week": "INTEGER",
             "open_positions_count": "INTEGER",
             "open_positions_same_sector": "INTEGER",
+            **classification_and_quote_columns(),
         }.items():
             self._add_column_if_missing(conn, "signal_diagnostics", column, definition)
         for column, definition in {
@@ -295,6 +343,7 @@ class Database:
             "previous_close": "REAL",
             "previous_volume": "REAL",
             "gap_flag": "INTEGER",
+            **classification_and_quote_columns(),
         }.items():
             self._add_column_if_missing(conn, "rejected_candidate_diagnostics", column, definition)
         for column, definition in {
@@ -310,6 +359,18 @@ class Database:
             "realized_r": "REAL",
         }.items():
             self._add_column_if_missing(conn, "signal_outcome_diagnostics", column, definition)
+        self._create_index_if_missing(
+            conn,
+            "idx_rejected_candidate_diagnostics_quote_quality",
+            "rejected_candidate_diagnostics",
+            "ticker, quote_validity_status, spread_percentage",
+        )
+        self._create_index_if_missing(
+            conn,
+            "idx_signal_diagnostics_quote_quality",
+            "signal_diagnostics",
+            "ticker, quote_validity_status, spread_percentage",
+        )
 
     def _add_column_if_missing(self, conn, table: str, column: str, definition: str) -> None:
         if self.is_sqlite:
@@ -329,6 +390,22 @@ class Database:
             existing = {row["column_name"] for row in cursor.fetchall()}
             if column not in existing:
                 cursor.execute(f"ALTER TABLE {table} ADD COLUMN {column} {self._postgres_column_definition(table, column, definition)}")
+
+    def _create_index_if_missing(self, conn, index_name: str, table: str, columns: str) -> None:
+        if self.is_sqlite:
+            conn.execute(f"CREATE INDEX IF NOT EXISTS {index_name} ON {table}({columns})")
+            return
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT indexname
+                FROM pg_indexes
+                WHERE schemaname = 'public' AND indexname = %s
+                """,
+                [index_name],
+            )
+            if cursor.fetchone() is None:
+                cursor.execute(f"CREATE INDEX {index_name} ON {table}({columns})")
 
     @staticmethod
     def _postgres_column_definition(table: str, column: str, definition: str) -> str:

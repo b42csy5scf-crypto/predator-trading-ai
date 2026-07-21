@@ -77,9 +77,42 @@ def test_postgresql_schema_uses_native_timestamp_types() -> None:
 
     assert "created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP" in statements
     assert "timestamp TIMESTAMPTZ NOT NULL" in statements
+    assert "quote_timestamp TIMESTAMPTZ" in statements
+    assert "evaluation_timestamp TIMESTAMPTZ" in statements
     assert "exit_timestamp TIMESTAMPTZ" in statements
     assert "signal_diagnostics" in statements
     assert "price_path" in statements
+
+
+def test_sqlite_diagnostics_classification_and_quote_columns(tmp_path) -> None:
+    db = Database(Settings(database_url=f"sqlite:///{tmp_path / 'schema.db'}"))
+    db.initialize()
+    conn = db.connect()
+    signal_columns = {row["name"] for row in conn.execute("PRAGMA table_info(signal_diagnostics)").fetchall()}
+    rejected_columns = {row["name"] for row in conn.execute("PRAGMA table_info(rejected_candidate_diagnostics)").fetchall()}
+    indexes = {row["name"] for row in conn.execute("PRAGMA index_list(rejected_candidate_diagnostics)").fetchall()}
+    conn.close()
+
+    expected = {
+        "raw_score",
+        "setup_grade",
+        "eligibility_status",
+        "eligibility_stage",
+        "block_reason_code",
+        "final_acceptance_status",
+        "displayed_grade_legacy",
+        "classification_format_version",
+        "raw_bid",
+        "raw_ask",
+        "quote_timestamp",
+        "evaluation_timestamp",
+        "spread_percentage",
+        "quote_validity_status",
+        "quote_validity_reasons",
+    }
+    assert expected <= signal_columns
+    assert expected <= rejected_columns
+    assert "idx_rejected_candidate_diagnostics_quote_quality" in indexes
 
 
 def test_postgresql_timestamp_migration_generates_safe_alters() -> None:

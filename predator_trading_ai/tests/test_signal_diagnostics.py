@@ -26,9 +26,22 @@ class FakeSnapshot:
     price: float = 125.0
     bid: float = 124.95
     ask: float = 125.05
+    bid_size: int | None = 100
+    ask_size: int | None = 120
     volume: int = 1000
     vwap: float | None = None
     timestamp: datetime = datetime(2026, 7, 9, 14, 45, tzinfo=timezone.utc)
+    quote_timestamp: datetime = datetime(2026, 7, 9, 14, 44, 30, tzinfo=timezone.utc)
+    data_source: str = "alpaca"
+    feed_name: str = "IEX"
+    feed_type: str = "feed_native"
+
+
+@dataclass(frozen=True)
+class FakeRiskDecision:
+    approved: bool = False
+    reasons: tuple[str, ...] = ("spread too wide: 3.50%",)
+    liquidity_score: float = 0.0
 
 
 def sample_bars() -> pd.DataFrame:
@@ -151,6 +164,19 @@ def test_accepted_signal_persistence(tmp_path) -> None:
     assert round(rows[0]["macd_minus_signal"], 2) == 0.4
     assert rows[0]["git_commit_hash"] == "abc123"
     assert rows[0]["research_dataset_version"] == "v1.0"
+    assert rows[0]["raw_score"] == 76
+    assert rows[0]["setup_grade"] == "A++ Signal"
+    assert rows[0]["eligibility_status"] == "ELIGIBLE"
+    assert rows[0]["final_acceptance_status"] == "ACCEPTED_TRADE_CANDIDATE"
+    assert rows[0]["classification_format_version"] == 2
+    assert rows[0]["raw_bid"] == 124.95
+    assert rows[0]["raw_ask"] == 125.05
+    assert rows[0]["bid_size"] == 100
+    assert rows[0]["ask_size"] == 120
+    assert rows[0]["quote_source"] == "alpaca"
+    assert rows[0]["feed_name"] == "IEX"
+    assert rows[0]["feed_native_flag"] == 1
+    assert rows[0]["quote_validity_status"] == "VALID"
     assert rows[0]["config_hash"]
     assert rows[0]["entry_open"] is not None
     assert rows[0]["previous_close"] is not None
@@ -169,6 +195,7 @@ def test_accepted_signal_persistence(tmp_path) -> None:
 def test_rejected_candidate_persistence(tmp_path) -> None:
     recorder, db = make_recorder(tmp_path)
     insert_active_signal(db, 1)
+    settings = Settings(database_url=f"sqlite:///{tmp_path / 'diagnostics.db'}")
 
     recorder.record_rejected_candidate(
         ticker="AAPL",
@@ -180,6 +207,7 @@ def test_rejected_candidate_persistence(tmp_path) -> None:
         conditions_failed=["Relative volume below threshold"],
         bars=sample_bars(),
         regime=sample_regime(),
+        settings=settings,
     )
 
     rows = db.fetch_all("SELECT * FROM rejected_candidate_diagnostics")
@@ -189,8 +217,95 @@ def test_rejected_candidate_persistence(tmp_path) -> None:
     assert rows[0]["first_rejection_gate"] == "grade_below_trade_candidate_threshold"
     assert rows[0]["actual_first_blocking_gate"] == "grade_below_trade_candidate_threshold"
     assert rows[0]["diagnostics_format_version"] == 2
+    assert rows[0]["raw_score"] == 54
+    assert rows[0]["setup_grade"] == "C Risky/Early Alert"
+    assert rows[0]["eligibility_status"] == "REJECTED_BY_SCORE"
+    assert rows[0]["final_acceptance_status"] == "REJECTED"
+    assert rows[0]["displayed_grade_legacy"] == "B Watch Alert"
+    assert rows[0]["classification_format_version"] == 2
     assert rows[0]["entry_open"] is not None
     assert rows[0]["breakout_distance_atr"] is not None
+
+
+def test_rejected_candidate_keeps_setup_grade_when_policy_blocks(tmp_path) -> None:
+    recorder, db = make_recorder(tmp_path)
+    settings = Settings(database_url=f"sqlite:///{tmp_path / 'diagnostics.db'}")
+
+    recorder.record_rejected_candidate(
+        ticker="AAPL",
+        final_score=66,
+        computed_grade="B Watch Alert",
+        first_rejection_gate="SPY/QQQ not healthy for B alert",
+        rejection_reasons=["SPY/QQQ not healthy for B alert"],
+        conditions_passed=["price above EMA50", "EMA50 above EMA200"],
+        conditions_failed=["SPY/QQQ not healthy for B alert"],
+        bars=sample_bars(),
+        regime=sample_regime(),
+        settings=settings,
+    )
+
+    row = db.fetch_all("SELECT * FROM rejected_candidate_diagnostics")[0]
+    assert row["raw_score"] == 66
+    assert row["setup_grade"] == "A+ Signal"
+    assert row["computed_grade"] == "B Watch Alert"
+    assert row["displayed_grade_legacy"] == "B Watch Alert"
+    assert row["eligibility_status"] == "BLOCKED_BY_POLICY"
+    assert row["eligibility_stage"] == "market_policy"
+    assert row["final_acceptance_status"] == "REJECTED"
+
+
+def test_rejected_candidate_risk_engine_quote_forensics(tmp_path) -> None:
+    recorder, db = make_recorder(tmp_path)
+    settings = Settings(database_url=f"sqlite:///{tmp_path / 'diagnostics.db'}")
+
+    recorder.record_rejected_candidate(
+        ticker="AAPL",
+        final_score=78,
+        computed_grade="A++ Signal",
+        first_rejection_gate="risk engine",
+        rejection_reasons=["spread too wide: 3.50%; liquidity score too low: 0"],
+        conditions_passed=["price above EMA50", "EMA50 above EMA200"],
+        conditions_failed=["spread too wide: 3.50%; liquidity score too low: 0"],
+        bars=sample_bars(),
+        regime=sample_regime(),
+        settings=settings,
+        snapshot=FakeSnapshot(bid=100.0, ask=104.0),
+        risk_decision=FakeRiskDecision(),
+        risk_engine_reached=True,
+    )
+
+    row = db.fetch_all("SELECT * FROM rejected_candidate_diagnostics")[0]
+    assert row["setup_grade"] == "A++ Signal"
+    assert row["eligibility_status"] == "BLOCKED_BY_RISK"
+    assert row["eligibility_stage"] == "risk_engine"
+    assert row["block_reason_code"] == "SPREAD_TOO_WIDE"
+    assert row["raw_bid"] == 100.0
+    assert row["raw_ask"] == 104.0
+    assert round(float(row["spread_percentage"]), 2) == 3.92
+    assert row["liquidity_score_at_evaluation"] == 0.0
+    assert row["quote_validity_status"] == "VALID"
+
+
+def test_rejected_candidate_without_risk_reach_skips_quote_forensics(tmp_path) -> None:
+    recorder, db = make_recorder(tmp_path)
+
+    recorder.record_rejected_candidate(
+        ticker="AAPL",
+        final_score=52,
+        computed_grade="C Risky/Early Alert",
+        first_rejection_gate="Grade below A",
+        rejection_reasons=["Grade below A"],
+        conditions_passed=[],
+        conditions_failed=["Grade below A"],
+        bars=sample_bars(),
+        regime=sample_regime(),
+        snapshot=FakeSnapshot(),
+        risk_engine_reached=False,
+    )
+
+    row = db.fetch_all("SELECT * FROM rejected_candidate_diagnostics")[0]
+    assert row["raw_bid"] is None
+    assert row["quote_validity_status"] is None
 
 
 def test_rejected_candidate_v2_grade_only_does_not_blame_passed_conditions(tmp_path) -> None:

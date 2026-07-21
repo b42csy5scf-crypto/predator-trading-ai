@@ -47,7 +47,9 @@ class RejectionInsightsReport:
         rows = self.db.fetch_all(
             """
             SELECT created_at, ticker, final_score, computed_grade, actual_first_blocking_gate,
-                   passed_conditions_v2_json, failed_conditions_v2_json, blocking_conditions_json
+                   passed_conditions_v2_json, failed_conditions_v2_json, blocking_conditions_json,
+                   setup_grade, eligibility_status, eligibility_stage, block_reason_display,
+                   final_acceptance_status, displayed_grade_legacy, classification_format_version
             FROM rejected_candidate_diagnostics
             WHERE final_score >= 50
               AND diagnostics_format_version = 2
@@ -69,6 +71,11 @@ class RejectionInsightsReport:
                     "",
                     f"{row['ticker']} | Score {float(row['final_score']):.1f} | {short_grade(row['computed_grade'])}",
                     f"Time: {row['created_at']}",
+                    f"Setup grade: {short_grade(row_get(row, 'setup_grade') or self.score_grade(float(row['final_score'])))}",
+                    f"Eligibility: {row_get(row, 'eligibility_status') or 'legacy/unavailable'} @ {row_get(row, 'eligibility_stage') or 'legacy/unavailable'}",
+                    f"Final: {row_get(row, 'final_acceptance_status') or 'REJECTED'}",
+                    f"Reason: {row_get(row, 'block_reason_display') or display_gate(row['actual_first_blocking_gate'], blocking)}",
+                    f"Classification: v{row_get(row, 'classification_format_version') or 'legacy'}",
                     f"First blocking gate: {display_gate(row['actual_first_blocking_gate'], blocking)}",
                     f"Counts: pass={len(passed)} fail={len(failed)} block={len(blocking)}",
                     "Passed:",
@@ -162,8 +169,14 @@ class RejectionInsightsReport:
             gate = display_gate(row["actual_first_blocking_gate"], blocking)
             score_grade = self.score_grade(float(row["final_score"]))
             displayed_grade = str(row["computed_grade"] or "unknown")
+            setup_grade = row_get(row, "setup_grade") or score_grade
+            eligibility = row_get(row, "eligibility_status") or "legacy/unavailable"
             lines.append(f"- {row['ticker']} {float(row['final_score']):.1f}")
-            lines.append(f"  Score grade: {short_grade(score_grade)} | Displayed: {short_grade(displayed_grade)}")
+            lines.append(
+                f"  Score grade: {short_grade(score_grade)} | Setup: {short_grade(setup_grade)} | "
+                f"Displayed: {short_grade(displayed_grade)}"
+            )
+            lines.append(f"  Eligibility: {eligibility} @ {row_get(row, 'eligibility_stage') or 'legacy/unavailable'}")
             lines.append(f"  Blocked by: {gate} ({len(blocking)} blocking)")
         return lines
 
@@ -242,6 +255,15 @@ def row_version(row: Any) -> int:
         return int(row["diagnostics_format_version"] or 1)
     except (KeyError, TypeError, ValueError):
         return 1
+
+
+def row_get(row: Any, key: str, default: Any = None) -> Any:
+    if isinstance(row, dict):
+        return row.get(key, default)
+    try:
+        return row[key]
+    except Exception:
+        return default
 
 
 def condition_line(condition: Any) -> str:

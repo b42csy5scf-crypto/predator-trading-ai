@@ -43,6 +43,9 @@ class SignalDiagnosticsRecorder:
     STRATEGY_VERSION = "1.0"
     SCHEMA_VERSION = "research-schema-v1.0"
     RESEARCH_DATASET_VERSION = "v1.0"
+    CLASSIFICATION_FORMAT_VERSION = 2
+    FORENSICS_FORMAT_VERSION = 1
+    SPREAD_FORMULA_VERSION = "midpoint_v1"
 
     def __init__(self, db: Database) -> None:
         self.db = db
@@ -111,6 +114,26 @@ class SignalDiagnosticsRecorder:
             open_positions_count=open_positions_count,
             open_positions_same_sector=open_positions_same_sector,
         )
+        classification = self.classification_payload(
+            raw_score=setup.score,
+            setup_grade=setup.signal_tier,
+            displayed_grade=setup.signal_tier,
+            eligibility_status="ELIGIBLE",
+            eligibility_stage="accepted",
+            block_reason_display=None,
+            final_acceptance_status=(
+                "ACCEPTED_STRONG_B_EXPERIMENTAL"
+                if alert_type == "experimental_watch"
+                else "ACCEPTED_TRADE_CANDIDATE"
+            ),
+        )
+        quote = self.quote_forensics_payload(
+            snapshot=snapshot,
+            settings=settings,
+            latest=bars.iloc[-1] if bars is not None and not bars.empty else None,
+            liquidity_score=None,
+            force=True,
+        )
         config_hash = self.record_config(settings) if settings is not None else None
         self.db.insert_dict(
             "signal_diagnostics",
@@ -149,11 +172,14 @@ class SignalDiagnosticsRecorder:
                 "config_hash": config_hash,
                 **entry_quality,
                 **market_context_metrics,
+                **classification,
+                **quote,
                 "scoring_components_json": list(setup.scoring_components),
                 "raw_metrics_json": {
                     **metrics,
                     **entry_quality,
                     **market_context_metrics,
+                    **self.raw_quote_metrics(quote),
                 },
             },
         )
@@ -183,6 +209,9 @@ class SignalDiagnosticsRecorder:
         regime: Optional[MarketRegime],
         settings: Optional[Settings] = None,
         evaluated_conditions: Optional[list[dict[str, Any]]] = None,
+        snapshot: Any = None,
+        risk_decision: Any = None,
+        risk_engine_reached: bool = False,
     ) -> None:
         if final_score < 50:
             return
@@ -209,6 +238,23 @@ class SignalDiagnosticsRecorder:
             )
         if settings is not None and getattr(settings, "enable_gate_audit_logs", False):
             self.log_gate_audit(ticker, final_score, computed_grade, canonical)
+        setup_grade = self.score_based_grade(final_score, settings, computed_grade)
+        eligibility = self.rejected_classification_payload(
+            raw_score=final_score,
+            setup_grade=setup_grade,
+            displayed_grade=computed_grade,
+            canonical=canonical,
+            first_rejection_gate=first_rejection_gate,
+            rejection_reasons=rejection_reasons,
+            risk_decision=risk_decision,
+        )
+        quote = self.quote_forensics_payload(
+            snapshot=snapshot,
+            settings=settings,
+            latest=bars.iloc[-1] if bars is not None and not bars.empty else None,
+            liquidity_score=getattr(risk_decision, "liquidity_score", None),
+            force=risk_engine_reached,
+        )
         self.db.insert_dict(
             "rejected_candidate_diagnostics",
             {
@@ -227,6 +273,8 @@ class SignalDiagnosticsRecorder:
                 "actual_first_blocking_gate": canonical["actual_first_blocking_gate"],
                 "why_not_trade": "; ".join(canonical["legacy_rejection_reasons"]) or "candidate was not accepted",
                 **entry_quality,
+                **eligibility,
+                **quote,
                 "raw_metrics_json": {
                     **metrics,
                     **entry_quality,
@@ -234,6 +282,7 @@ class SignalDiagnosticsRecorder:
                     "spy_trend": regime.spy_trend if regime else None,
                     "qqq_trend": regime.qqq_trend if regime else None,
                     "breadth_score": regime.breadth_score if regime else None,
+                    **self.raw_quote_metrics(quote),
                 },
             },
         )
@@ -616,6 +665,230 @@ class SignalDiagnosticsRecorder:
                 entry,
             ],
         )
+
+    def score_based_grade(self, score: float, settings: Optional[Settings], fallback: str) -> str:
+        if settings is None:
+            return fallback
+        min_b = max(float(getattr(settings, "min_score_b", 58)), 58.0)
+        if score >= float(settings.min_score_a_plus_plus):
+            return "A++ Signal"
+        if score >= float(settings.min_score_a_plus):
+            return "A+ Signal"
+        if score >= float(settings.min_score_a):
+            return "A Signal"
+        if score >= min_b:
+            return "B Watch Alert"
+        return "C Risky/Early Alert"
+
+    def classification_payload(
+        self,
+        *,
+        raw_score: float,
+        setup_grade: str,
+        displayed_grade: str,
+        eligibility_status: str,
+        eligibility_stage: str,
+        block_reason_display: Optional[str],
+        final_acceptance_status: str,
+    ) -> dict[str, Any]:
+        return {
+            "raw_score": raw_score,
+            "setup_grade": setup_grade,
+            "eligibility_status": eligibility_status,
+            "eligibility_stage": eligibility_stage,
+            "block_reason_code": self.reason_code(block_reason_display),
+            "block_reason_display": block_reason_display,
+            "final_acceptance_status": final_acceptance_status,
+            "displayed_grade_legacy": displayed_grade,
+            "classification_format_version": self.CLASSIFICATION_FORMAT_VERSION,
+        }
+
+    def rejected_classification_payload(
+        self,
+        *,
+        raw_score: float,
+        setup_grade: str,
+        displayed_grade: str,
+        canonical: dict[str, Any],
+        first_rejection_gate: Optional[str],
+        rejection_reasons: list[str],
+        risk_decision: Any,
+    ) -> dict[str, Any]:
+        reason = "; ".join(canonical.get("legacy_rejection_reasons") or rejection_reasons) or first_rejection_gate
+        gate = canonical.get("actual_first_blocking_gate") or first_rejection_gate or ""
+        lowered = " ".join([gate, reason or ""]).lower()
+        if risk_decision is not None or any(marker in lowered for marker in ("spread too wide", "liquidity score", "risk/reward", "risk engine")):
+            status = "BLOCKED_BY_RISK"
+            stage = "risk_engine"
+        elif "spy/qqq" in lowered or "market" in lowered or "regime" in lowered:
+            status = "BLOCKED_BY_POLICY"
+            stage = "market_policy"
+        elif "grade below" in lowered or setup_grade in {"B Watch Alert", "C Risky/Early Alert"}:
+            status = "REJECTED_BY_SCORE"
+            stage = "score"
+        elif "alert" in lowered or "cooldown" in lowered or "maximum" in lowered:
+            status = "BLOCKED_BY_ALERT_POLICY"
+            stage = "alert_policy"
+        elif reason:
+            status = "BLOCKED_BY_POLICY"
+            stage = "strategy_policy"
+        else:
+            status = "UNKNOWN"
+            stage = "unknown"
+        return self.classification_payload(
+            raw_score=raw_score,
+            setup_grade=setup_grade,
+            displayed_grade=displayed_grade,
+            eligibility_status=status,
+            eligibility_stage=stage,
+            block_reason_display=reason,
+            final_acceptance_status="REJECTED",
+        )
+
+    @staticmethod
+    def reason_code(reason: Optional[str]) -> Optional[str]:
+        if not reason:
+            return None
+        normalized = reason.lower()
+        mappings = (
+            ("spy/qqq", "SPY_QQQ_UNHEALTHY"),
+            ("spread too wide", "SPREAD_TOO_WIDE"),
+            ("liquidity score too low", "LOW_LIQUIDITY_SCORE"),
+            ("risk/reward", "RISK_REWARD_TOO_LOW"),
+            ("grade below", "GRADE_BELOW_TRADE_THRESHOLD"),
+            ("cooldown", "COOLDOWN_ACTIVE"),
+            ("maximum", "DAILY_OR_TICKER_LIMIT"),
+            ("market regime", "MARKET_REGIME_UNSAFE"),
+        )
+        for marker, code in mappings:
+            if marker in normalized:
+                return code
+        return "".join(ch if ch.isalnum() else "_" for ch in normalized.upper()).strip("_")[:80] or "UNKNOWN"
+
+    def quote_forensics_payload(
+        self,
+        *,
+        snapshot: Any,
+        settings: Optional[Settings],
+        latest: Any,
+        liquidity_score: Optional[float],
+        force: bool,
+    ) -> dict[str, Any]:
+        if snapshot is None:
+            return {}
+        bid = getattr(snapshot, "bid", None)
+        ask = getattr(snapshot, "ask", None)
+        spread = spread_pct(bid, ask)
+        should_store = force
+        if spread != float("inf") and spread > 2:
+            should_store = True
+        if liquidity_score is not None and settings is not None and liquidity_score < settings.min_liquidity_score:
+            should_store = True
+        if not should_store:
+            return {}
+        evaluation = datetime.now(timezone.utc)
+        quote_timestamp = self.normalize_datetime(getattr(snapshot, "quote_timestamp", None) or getattr(snapshot, "timestamp", None))
+        quote_age = None
+        if quote_timestamp is not None:
+            quote_age = max((evaluation - quote_timestamp).total_seconds(), 0)
+        midpoint = ((bid + ask) / 2) if bid is not None and ask is not None and bid > 0 and ask > 0 else None
+        validity, validity_reasons = self.quote_validity(bid, ask, quote_age)
+        session_state = self.market_session_state(getattr(snapshot, "timestamp", evaluation))
+        relative_volume = self.safe_float(latest.get("relative_volume")) if latest is not None and hasattr(latest, "get") else None
+        return {
+            "raw_bid": bid,
+            "raw_ask": ask,
+            "bid_size": getattr(snapshot, "bid_size", None),
+            "ask_size": getattr(snapshot, "ask_size", None),
+            "last_trade_price": getattr(snapshot, "price", None),
+            "midpoint": midpoint,
+            "quote_timestamp": quote_timestamp.isoformat() if quote_timestamp is not None else None,
+            "evaluation_timestamp": evaluation.isoformat(),
+            "quote_age_seconds": quote_age,
+            "quote_source": getattr(snapshot, "data_source", None),
+            "feed_name": getattr(snapshot, "feed_name", None),
+            "feed_type": getattr(snapshot, "feed_type", None),
+            "nbbo_flag": 0,
+            "feed_native_flag": int(getattr(snapshot, "feed_type", "") == "feed_native"),
+            "spread_absolute": (ask - bid) if bid is not None and ask is not None else None,
+            "spread_percentage": None if spread == float("inf") else spread,
+            "spread_formula_version": self.SPREAD_FORMULA_VERSION,
+            "liquidity_score_at_evaluation": liquidity_score,
+            "raw_volume": getattr(snapshot, "volume", None),
+            "quote_relative_volume": relative_volume,
+            "market_session_state": session_state,
+            "market_status": session_state,
+            "retry_used": None,
+            "stale_quote_flag": int("STALE" in validity_reasons),
+            "missing_bid_flag": int(bid is None),
+            "missing_ask_flag": int(ask is None),
+            "nonpositive_bid_flag": int(bid is not None and bid <= 0),
+            "nonpositive_ask_flag": int(ask is not None and ask <= 0),
+            "crossed_market_flag": int(bid is not None and ask is not None and ask < bid),
+            "raw_quote_payload_version": "quote_forensics_v1",
+            "forensics_format_version": self.FORENSICS_FORMAT_VERSION,
+            "quote_validity_status": validity,
+            "quote_validity_reasons": json.dumps(validity_reasons),
+        }
+
+    @staticmethod
+    def quote_validity(bid: Any, ask: Any, quote_age_seconds: Optional[float]) -> tuple[str, list[str]]:
+        reasons: list[str] = []
+        if bid is None:
+            reasons.append("MISSING_BID")
+        if ask is None:
+            reasons.append("MISSING_ASK")
+        if bid is not None and bid <= 0:
+            reasons.append("NONPOSITIVE_BID")
+        if ask is not None and ask <= 0:
+            reasons.append("NONPOSITIVE_ASK")
+        if bid is not None and ask is not None and ask < bid:
+            reasons.append("CROSSED_MARKET")
+        if quote_age_seconds is None:
+            reasons.append("UNKNOWN")
+        elif quote_age_seconds > 900:
+            reasons.append("STALE")
+        if not reasons:
+            return "VALID", []
+        priority = ("MISSING_BID", "MISSING_ASK", "NONPOSITIVE_BID", "NONPOSITIVE_ASK", "CROSSED_MARKET", "STALE", "UNKNOWN")
+        for item in priority:
+            if item in reasons:
+                return item, reasons
+        return "UNKNOWN", reasons
+
+    @staticmethod
+    def market_session_state(timestamp: Any) -> str:
+        current = SignalDiagnosticsRecorder.normalize_datetime(timestamp) or datetime.now(timezone.utc)
+        eastern = current.astimezone(EASTERN)
+        minutes = eastern.hour * 60 + eastern.minute
+        is_open = eastern.weekday() < 5 and (9 * 60 + 30) <= minutes <= (16 * 60)
+        return "OPEN" if is_open else "CLOSED"
+
+    @staticmethod
+    def normalize_datetime(value: Any) -> Optional[datetime]:
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            dt = value
+        else:
+            try:
+                dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            except ValueError:
+                return None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+
+    @staticmethod
+    def safe_float(value: Any) -> Optional[float]:
+        try:
+            return float(value) if value is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def raw_quote_metrics(quote: dict[str, Any]) -> dict[str, Any]:
+        return {key: value for key, value in quote.items() if value is not None}
 
     def cleanup(self, retention_days: int = 30) -> None:
         self.db.cleanup_signal_diagnostics(retention_days)

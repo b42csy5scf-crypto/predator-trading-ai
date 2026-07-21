@@ -272,6 +272,9 @@ class PredatorTradingAI:
         diagnostic = self.new_candidate_diagnostic(ticker)
         bars = None
         regime = None
+        snapshot = None
+        risk = None
+        risk_engine_reached = False
         try:
             bars = self.retry.run(
                 f"market bars {ticker}",
@@ -350,6 +353,7 @@ class PredatorTradingAI:
                 self.add_rejection(diagnostic, "Already active signal")
 
             risk = self.evaluate_risk(setup, snapshot, regime, options_confirmation)
+            risk_engine_reached = True
             if not risk.approved:
                 grade_candidate = setup.signal_tier
                 reason = "; ".join(risk.reasons)
@@ -470,21 +474,24 @@ class PredatorTradingAI:
                 signal_id,
                 self.active_signal_tracker.active_count(),
             )
-            self.signal_diagnostics.record_accepted_signal(
-                signal_id=self.signal_engine.last_signal_id,
-                active_signal_id=signal_id,
-                setup=setup,
-                signal=signal,
-                bars=bars,
-                regime=regime,
-                telegram_note=SignalEngine.short_note(signal.reason, observe_only=False),
-                settings=self.settings,
-                snapshot=snapshot,
-                market_context=self.market_context,
-                open_positions_count=self.active_signal_tracker.active_count(),
-                open_positions_same_sector=self.active_positions_in_sector(SECTOR_BY_TICKER.get(ticker)),
-                git_commit_hash=self.current_commit_hash(),
-            )
+            try:
+                self.signal_diagnostics.record_accepted_signal(
+                    signal_id=self.signal_engine.last_signal_id,
+                    active_signal_id=signal_id,
+                    setup=setup,
+                    signal=signal,
+                    bars=bars,
+                    regime=regime,
+                    telegram_note=SignalEngine.short_note(signal.reason, observe_only=False),
+                    settings=self.settings,
+                    snapshot=snapshot,
+                    market_context=self.market_context,
+                    open_positions_count=self.active_signal_tracker.active_count(),
+                    open_positions_same_sector=self.active_positions_in_sector(SECTOR_BY_TICKER.get(ticker)),
+                    git_commit_hash=self.current_commit_hash(),
+                )
+            except Exception as exc:
+                self.logger.warning("Accepted signal diagnostics persistence failed for %s: %s", ticker, exc)
             self.state.last_telegram_alert = alert_key
             self.state_store.set_cooldown(self.state, alert_key)
             asyncio.run(self.telegram_bot.send_message(message))
@@ -492,7 +499,14 @@ class PredatorTradingAI:
             self.record_signal_generated()
         finally:
             self.log_candidate_diagnostic(diagnostic)
-            self.persist_candidate_diagnostic(diagnostic, bars, regime)
+            self.persist_candidate_diagnostic(
+                diagnostic,
+                bars,
+                regime,
+                snapshot=snapshot,
+                risk=risk,
+                risk_engine_reached=risk_engine_reached,
+            )
 
     @staticmethod
     def new_candidate_diagnostic(ticker: str) -> dict:
@@ -580,7 +594,16 @@ class PredatorTradingAI:
             "\n".join(f"- {reason}" for reason in reasons),
         )
 
-    def persist_candidate_diagnostic(self, diagnostic: dict, bars, regime: Optional[MarketRegime]) -> None:
+    def persist_candidate_diagnostic(
+        self,
+        diagnostic: dict,
+        bars,
+        regime: Optional[MarketRegime],
+        *,
+        snapshot=None,
+        risk=None,
+        risk_engine_reached: bool = False,
+    ) -> None:
         if diagnostic.get("passed"):
             return
         score = diagnostic.get("score")
@@ -604,6 +627,9 @@ class PredatorTradingAI:
                 bars=bars,
                 regime=regime,
                 settings=self.settings,
+                snapshot=snapshot,
+                risk_decision=risk,
+                risk_engine_reached=risk_engine_reached,
             )
         except Exception as exc:
             self.logger.warning("Rejected candidate diagnostics persistence failed for %s: %s", diagnostic["ticker"], exc)

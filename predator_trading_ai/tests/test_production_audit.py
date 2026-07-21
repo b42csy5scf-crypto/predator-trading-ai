@@ -43,6 +43,7 @@ def insert_rejected(
     gate: str,
     raw_metrics: dict | None = None,
     created_at: str | None = None,
+    extra: dict | None = None,
 ) -> None:
     blocking = [
         {
@@ -52,9 +53,7 @@ def insert_rejected(
             "is_blocking": True,
         }
     ]
-    db.insert_dict(
-        "rejected_candidate_diagnostics",
-        {
+    payload = {
             "created_at": created_at or iso_at(),
             "ticker": ticker,
             "final_score": score,
@@ -71,8 +70,9 @@ def insert_rejected(
             "actual_first_blocking_gate": gate,
             "why_not_trade": reason,
             "raw_metrics_json": raw_metrics or {},
-        },
-    )
+    }
+    payload.update(extra or {})
+    db.insert_dict("rejected_candidate_diagnostics", payload)
 
 
 def insert_accepted_with_quote(db: Database, *, ticker: str, created_at: str, raw_metrics: dict) -> None:
@@ -110,6 +110,17 @@ def test_grade_trace_score_mapping_and_no_invented_market_grade(tmp_path) -> Non
         reason="spread too wide: 5.73%; liquidity score too low: 0",
         gate="risk_engine",
         raw_metrics={"spy_trend": "bull", "qqq_trend": "bear", "regime": "bull"},
+        extra={
+            "raw_score": 90.6,
+            "setup_grade": "A++ Signal",
+            "eligibility_status": "BLOCKED_BY_RISK",
+            "eligibility_stage": "risk_engine",
+            "block_reason_code": "SPREAD_TOO_WIDE",
+            "block_reason_display": "spread too wide: 5.73%; liquidity score too low: 0",
+            "final_acceptance_status": "REJECTED",
+            "displayed_grade_legacy": "A++ Signal",
+            "classification_format_version": 2,
+        },
     )
     insert_rejected(
         db,
@@ -140,6 +151,11 @@ def test_grade_trace_score_mapping_and_no_invented_market_grade(tmp_path) -> Non
     assert "COP | score 74.7 | INTENTIONAL_POLICY_DOWNGRADE" in report
     assert "CVX | score 70.5 | REPORTING_STAGE_MISMATCH" in report
     assert "Thresholds: B>=58 A>=58 A+>=65 A++>=75" in report
+    assert "Note: B and A share the same numeric threshold" in report
+    assert "Setup grade: A++ Signal" in report
+    assert "Eligibility: BLOCKED_BY_RISK @ risk_engine" in report
+    assert "Block code: SPREAD_TOO_WIDE" in report
+    assert "Classification version: 2" in report
     assert "Telegram reached: NO" in report
     assert "Tracker add reached: NO" in report
 
@@ -177,6 +193,21 @@ def test_spread_forensics_valid_bid_ask_and_quote_age(tmp_path) -> None:
             "relative_volume": 1.2,
             "alpaca_api_key": "SECRET",
         },
+        extra={
+            "raw_bid": 100,
+            "raw_ask": 101,
+            "last_trade_price": 100.5,
+            "quote_timestamp": (NOW - timedelta(seconds=45)).isoformat(),
+            "evaluation_timestamp": NOW.isoformat(),
+            "quote_age_seconds": 45,
+            "quote_source": "alpaca",
+            "feed_name": "IEX",
+            "feed_type": "feed_native",
+            "spread_percentage": 1.0,
+            "liquidity_score_at_evaluation": 80,
+            "quote_validity_status": "VALID",
+            "quote_validity_reasons": [],
+        },
     )
 
     report = ProductionAuditReport(settings, db).spread_forensics("AAPL")
@@ -185,6 +216,8 @@ def test_spread_forensics_valid_bid_ask_and_quote_age(tmp_path) -> None:
     assert "Bid/Ask/Last: 100.00 / 101.00 / 100.50" in report
     assert "Spread: 1.00 (1.00%)" in report
     assert "Source/feed: alpaca / IEX" in report
+    assert "Quote validity: VALID reasons=none" in report
+    assert "Quote anomaly: none" in report
     assert "Quote ts/age:" in report
     assert "45s" in report
     assert "Raw quote forensics available." in report
