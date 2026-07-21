@@ -84,6 +84,14 @@ def test_postgresql_schema_uses_native_timestamp_types() -> None:
     assert "price_path" in statements
 
 
+def test_postgresql_schema_defers_quote_indexes_until_after_migration() -> None:
+    db = Database(Settings(database_url="postgresql://user:password@example.invalid:5432/dbname"))
+    statements = "\n".join(db._postgres_schema_statements())
+
+    assert "idx_rejected_candidate_diagnostics_quote_quality" not in statements
+    assert "idx_signal_diagnostics_quote_quality" not in statements
+
+
 def test_sqlite_diagnostics_classification_and_quote_columns(tmp_path) -> None:
     db = Database(Settings(database_url=f"sqlite:///{tmp_path / 'schema.db'}"))
     db.initialize()
@@ -113,6 +121,46 @@ def test_sqlite_diagnostics_classification_and_quote_columns(tmp_path) -> None:
     assert expected <= signal_columns
     assert expected <= rejected_columns
     assert "idx_rejected_candidate_diagnostics_quote_quality" in indexes
+
+
+def test_postgresql_quote_index_creation_skips_missing_columns() -> None:
+    class FakeCursor:
+        def __init__(self):
+            self.statements: list[tuple[str, list | None]] = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def execute(self, sql, params=None):
+            self.statements.append((sql, params))
+
+        def fetchall(self):
+            return [{"column_name": "ticker"}]
+
+        def fetchone(self):
+            return None
+
+    class FakeConn:
+        def __init__(self):
+            self.cursor_obj = FakeCursor()
+
+        def cursor(self):
+            return self.cursor_obj
+
+    db = Database(Settings(database_url="postgresql://user:password@example.invalid:5432/dbname"))
+    conn = FakeConn()
+    db._create_index_if_missing(
+        conn,
+        "idx_rejected_candidate_diagnostics_quote_quality",
+        "rejected_candidate_diagnostics",
+        "ticker, quote_validity_status, spread_percentage",
+    )
+    sql_text = "\n".join(sql for sql, _ in conn.cursor_obj.statements)
+
+    assert "CREATE INDEX idx_rejected_candidate_diagnostics_quote_quality" not in sql_text
 
 
 def test_postgresql_timestamp_migration_generates_safe_alters() -> None:

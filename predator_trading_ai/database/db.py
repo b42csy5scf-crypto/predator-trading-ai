@@ -250,7 +250,23 @@ class Database:
         raw = raw.replace("REAL", "DOUBLE PRECISION")
         raw = raw.replace("DATETIME", "TIMESTAMP")
         raw = self._postgres_timestamp_schema(raw)
-        return split_sql_statements(raw)
+        return [
+            statement
+            for statement in split_sql_statements(raw)
+            if not self._is_post_migration_index_statement(statement)
+        ]
+
+    @staticmethod
+    def _is_post_migration_index_statement(statement: str) -> bool:
+        normalized = " ".join(statement.lower().split())
+        return (
+            normalized.startswith("create index")
+            and "quote_validity_status" in normalized
+            and (
+                "idx_rejected_candidate_diagnostics_quote_quality" in normalized
+                or "idx_signal_diagnostics_quote_quality" in normalized
+            )
+        )
 
     @staticmethod
     def _postgres_timestamp_schema(raw: str) -> str:
@@ -392,10 +408,39 @@ class Database:
                 cursor.execute(f"ALTER TABLE {table} ADD COLUMN {column} {self._postgres_column_definition(table, column, definition)}")
 
     def _create_index_if_missing(self, conn, index_name: str, table: str, columns: str) -> None:
+        column_names = [column.strip().split()[0] for column in columns.split(",")]
         if self.is_sqlite:
+            existing_columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+            missing_columns = sorted(set(column_names) - existing_columns)
+            if missing_columns:
+                self.logger.warning(
+                    "Skipping index %s: table %s missing columns %s",
+                    index_name,
+                    table,
+                    ", ".join(missing_columns),
+                )
+                return
             conn.execute(f"CREATE INDEX IF NOT EXISTS {index_name} ON {table}({columns})")
             return
         with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_schema = 'public' AND table_name = %s
+                """,
+                [table],
+            )
+            existing_columns = {row["column_name"] for row in cursor.fetchall()}
+            missing_columns = sorted(set(column_names) - existing_columns)
+            if missing_columns:
+                self.logger.warning(
+                    "Skipping index %s: table %s missing columns %s",
+                    index_name,
+                    table,
+                    ", ".join(missing_columns),
+                )
+                return
             cursor.execute(
                 """
                 SELECT indexname
