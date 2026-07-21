@@ -138,7 +138,10 @@ class AlertPolicy:
                     WHEN excluded.highest_grade_rank > alert_daily_limits.highest_grade_rank THEN excluded.highest_grade
                     ELSE alert_daily_limits.highest_grade
                 END,
-                highest_grade_rank = MAX(alert_daily_limits.highest_grade_rank, excluded.highest_grade_rank),
+                highest_grade_rank = CASE
+                    WHEN excluded.highest_grade_rank > alert_daily_limits.highest_grade_rank THEN excluded.highest_grade_rank
+                    ELSE alert_daily_limits.highest_grade_rank
+                END,
                 last_alert_at = excluded.last_alert_at
             """,
             [alert_date, ticker, grade, rank, timestamp],
