@@ -32,6 +32,8 @@ COMMANDS = (
     "/health",
     "/rejected_examples",
     "/score_distribution",
+    "/grade_trace",
+    "/spread_forensics",
 )
 
 

@@ -165,6 +165,8 @@ def test_monitor_status_lists_rejection_insight_commands(tmp_path) -> None:
 
     assert "/rejected_examples" in report
     assert "/score_distribution" in report
+    assert "/grade_trace" in report
+    assert "/spread_forensics" in report
 
 
 def test_monitor_status_scanner_heartbeat_stale(tmp_path) -> None:

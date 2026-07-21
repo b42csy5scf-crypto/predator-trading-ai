@@ -456,3 +456,73 @@ def test_score_distribution_command_is_handled_without_application_polling(monke
 
     assert periods_seen == ["7d"]
     assert sent == []
+
+
+def test_grade_trace_command_is_handled_without_application_polling(monkeypatch) -> None:
+    sent: list[tuple[str, str]] = []
+    limits_seen: list[int] = []
+
+    class FakeBot:
+        async def send_message(self, chat_id, text):
+            sent.append((chat_id, text))
+
+    class FakeRunner:
+        def __init__(self, settings, db):
+            pass
+
+        async def send_grade_trace(self, limit=10):
+            limits_seen.append(limit)
+            return type("Result", (), {"sent": True})()
+
+    import predator_trading_ai.reports.production_audit_runner as production_audit_runner
+
+    monkeypatch.setattr(production_audit_runner, "ProductionAuditRunner", FakeRunner)
+    bot = TelegramAlertBot(Settings(telegram_bot_token="token", telegram_chat_id="123"))
+    update = type(
+        "FakeUpdate",
+        (),
+        {
+            "message": type("FakeMessage", (), {"text": "/grade_trace 25"})(),
+            "effective_chat": type("FakeChat", (), {"id": "123"})(),
+        },
+    )()
+
+    asyncio.run(bot.handle_command_update(FakeBot(), update))
+
+    assert limits_seen == [25]
+    assert sent == []
+
+
+def test_spread_forensics_command_is_handled_without_application_polling(monkeypatch) -> None:
+    sent: list[tuple[str, str]] = []
+    calls_seen: list[tuple[str, int]] = []
+
+    class FakeBot:
+        async def send_message(self, chat_id, text):
+            sent.append((chat_id, text))
+
+    class FakeRunner:
+        def __init__(self, settings, db):
+            pass
+
+        async def send_spread_forensics(self, ticker, limit=5):
+            calls_seen.append((ticker, limit))
+            return type("Result", (), {"sent": True})()
+
+    import predator_trading_ai.reports.production_audit_runner as production_audit_runner
+
+    monkeypatch.setattr(production_audit_runner, "ProductionAuditRunner", FakeRunner)
+    bot = TelegramAlertBot(Settings(telegram_bot_token="token", telegram_chat_id="123"))
+    update = type(
+        "FakeUpdate",
+        (),
+        {
+            "message": type("FakeMessage", (), {"text": "/spread_forensics UNH 20"})(),
+            "effective_chat": type("FakeChat", (), {"id": "123"})(),
+        },
+    )()
+
+    asyncio.run(bot.handle_command_update(FakeBot(), update))
+
+    assert calls_seen == [("UNH", 20)]
+    assert sent == []

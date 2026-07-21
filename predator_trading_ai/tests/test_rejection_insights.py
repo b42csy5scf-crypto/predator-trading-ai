@@ -13,6 +13,9 @@ NOW = datetime(2026, 7, 20, 15, 0, tzinfo=timezone.utc)
 def make_settings(tmp_path, **overrides) -> Settings:
     settings = Settings()
     settings.database_url = f"sqlite:///{tmp_path / 'rejection_insights.db'}"
+    settings.min_score_a_plus_plus = 75
+    settings.min_score_a_plus = 65
+    settings.min_score_a = 58
     settings.min_score_b = 58
     for key, value in overrides.items():
         setattr(settings, key, value)
@@ -250,7 +253,8 @@ def test_score_distribution_near_min_b_and_top_almost_trades(tmp_path) -> None:
 
     assert "Within 1 point(s) of MIN_SCORE_B: 1" in report
     assert "Top almost-trades" in report
-    assert "- META 58.9 | B Watch" in report
+    assert "- META 58.9" in report
+    assert "Score grade: A | Displayed: B Watch" in report
     assert "Blocked by: Relative volume not confirmed" in report
 
 

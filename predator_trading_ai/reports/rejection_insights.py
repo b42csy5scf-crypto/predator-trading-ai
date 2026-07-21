@@ -160,9 +160,24 @@ class RejectionInsightsReport:
         for row in rows[:10]:
             blocking = decode_json_list(row["blocking_conditions_json"])
             gate = display_gate(row["actual_first_blocking_gate"], blocking)
-            lines.append(f"- {row['ticker']} {float(row['final_score']):.1f} | {short_grade(row['computed_grade'])}")
+            score_grade = self.score_grade(float(row["final_score"]))
+            displayed_grade = str(row["computed_grade"] or "unknown")
+            lines.append(f"- {row['ticker']} {float(row['final_score']):.1f}")
+            lines.append(f"  Score grade: {short_grade(score_grade)} | Displayed: {short_grade(displayed_grade)}")
             lines.append(f"  Blocked by: {gate} ({len(blocking)} blocking)")
         return lines
+
+    def score_grade(self, score: float) -> str:
+        if score >= float(self.settings.min_score_a_plus_plus):
+            return "A++ Signal"
+        if score >= float(self.settings.min_score_a_plus):
+            return "A+ Signal"
+        if score >= float(self.settings.min_score_a):
+            return "A Signal"
+        threshold_b = max(float(getattr(self.settings, "min_score_b", MIN_B_ALERT_SCORE_FLOOR)), MIN_B_ALERT_SCORE_FLOOR)
+        if score >= threshold_b:
+            return "B Watch Alert"
+        return "C Risky/Early Alert"
 
     def today_baseline_lines(self, today_scores: list[float], period: Period) -> list[str]:
         baseline_start = period.start - timedelta(days=7)

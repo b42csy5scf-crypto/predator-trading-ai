@@ -147,6 +147,8 @@ class TelegramAlertBot:
             "/health",
             "/rejected_examples",
             "/score_distribution",
+            "/grade_trace",
+            "/spread_forensics",
             *research_commands,
         }:
             return
@@ -201,6 +203,39 @@ class TelegramAlertBot:
                 await bot.send_message(
                     chat_id=chat_id,
                     text="Score distribution generated, but Telegram recipients are not configured.",
+                )
+            return
+        if command == "/grade_trace":
+            limit = 10
+            if args:
+                try:
+                    limit = int(args[0])
+                except ValueError:
+                    limit = 10
+            from predator_trading_ai.reports.production_audit_runner import ProductionAuditRunner
+
+            result = await ProductionAuditRunner(self.settings, self.db).send_grade_trace(limit=limit)
+            if not result.sent:
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text="Grade trace generated, but Telegram recipients are not configured.",
+                )
+            return
+        if command == "/spread_forensics":
+            ticker = args[0] if args else ""
+            limit = 5
+            if len(args) > 1:
+                try:
+                    limit = int(args[1])
+                except ValueError:
+                    limit = 5
+            from predator_trading_ai.reports.production_audit_runner import ProductionAuditRunner
+
+            result = await ProductionAuditRunner(self.settings, self.db).send_spread_forensics(ticker=ticker, limit=limit)
+            if not result.sent:
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text="Spread forensics generated, but Telegram recipients are not configured.",
                 )
             return
         if command in research_commands:
