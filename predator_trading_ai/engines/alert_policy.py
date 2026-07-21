@@ -133,12 +133,12 @@ class AlertPolicy:
             )
             VALUES (?, ?, 1, ?, ?, ?)
             ON CONFLICT(alert_date, ticker) DO UPDATE SET
-                alert_count = alert_count + 1,
+                alert_count = alert_daily_limits.alert_count + 1,
                 highest_grade = CASE
-                    WHEN excluded.highest_grade_rank > highest_grade_rank THEN excluded.highest_grade
-                    ELSE highest_grade
+                    WHEN excluded.highest_grade_rank > alert_daily_limits.highest_grade_rank THEN excluded.highest_grade
+                    ELSE alert_daily_limits.highest_grade
                 END,
-                highest_grade_rank = MAX(highest_grade_rank, excluded.highest_grade_rank),
+                highest_grade_rank = MAX(alert_daily_limits.highest_grade_rank, excluded.highest_grade_rank),
                 last_alert_at = excluded.last_alert_at
             """,
             [alert_date, ticker, grade, rank, timestamp],
