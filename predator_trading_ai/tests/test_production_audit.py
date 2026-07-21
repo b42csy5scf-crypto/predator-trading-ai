@@ -205,6 +205,7 @@ def test_spread_forensics_valid_bid_ask_and_quote_age(tmp_path) -> None:
             "feed_type": "feed_native",
             "spread_percentage": 1.0,
             "liquidity_score_at_evaluation": 80,
+            "liquidity_score_status": "MEASURED",
             "quote_validity_status": "VALID",
             "quote_validity_reasons": [],
         },
@@ -218,6 +219,7 @@ def test_spread_forensics_valid_bid_ask_and_quote_age(tmp_path) -> None:
     assert "Source/feed: alpaca / IEX" in report
     assert "Quote validity: VALID reasons=none" in report
     assert "Quote anomaly: none" in report
+    assert "Status: MEASURED" in report
     assert "Quote ts/age:" in report
     assert "45s" in report
     assert "Raw quote forensics available." in report

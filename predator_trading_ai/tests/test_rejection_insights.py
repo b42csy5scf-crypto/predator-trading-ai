@@ -254,7 +254,7 @@ def test_score_distribution_near_min_b_and_top_almost_trades(tmp_path) -> None:
     assert "Within 1 point(s) of MIN_SCORE_B: 1" in report
     assert "Top almost-trades" in report
     assert "- META 58.9" in report
-    assert "Score grade: A | Displayed: B Watch" in report
+    assert "Score grade: A | Setup: A | Displayed: B Watch" in report
     assert "Blocked by: Relative volume not confirmed" in report
 
 

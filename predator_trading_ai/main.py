@@ -5,6 +5,7 @@ import subprocess
 import time
 import uuid
 from collections import Counter
+from dataclasses import dataclass
 from datetime import datetime, time as dt_time, timedelta, timezone
 from typing import Optional
 from zoneinfo import ZoneInfo
@@ -39,6 +40,12 @@ EASTERN = ZoneInfo("America/New_York")
 MARKET_OPEN = dt_time(9, 30)
 MARKET_CLOSE = dt_time(16, 0)
 MARKET_CLOSED_HEARTBEAT_SECONDS = 60
+
+
+@dataclass(frozen=True)
+class LiquidityAssessment:
+    score: Optional[float]
+    status: str
 
 
 class PredatorTradingAI:
@@ -489,6 +496,8 @@ class PredatorTradingAI:
                     open_positions_count=self.active_signal_tracker.active_count(),
                     open_positions_same_sector=self.active_positions_in_sector(SECTOR_BY_TICKER.get(ticker)),
                     git_commit_hash=self.current_commit_hash(),
+                    liquidity_score=risk.liquidity_score,
+                    liquidity_score_status=risk.liquidity_status,
                 )
             except Exception as exc:
                 self.logger.warning("Accepted signal diagnostics persistence failed for %s: %s", ticker, exc)
@@ -966,7 +975,7 @@ class PredatorTradingAI:
         regime: MarketRegime,
         options_confirmation: Optional[dict],
     ):
-        liquidity_score = self.estimate_liquidity_score(snapshot, options_confirmation)
+        liquidity = self.estimate_liquidity_score(snapshot, options_confirmation)
         return self.risk_engine.evaluate(
             setup=setup,
             account_equity=self.settings.paper_account_equity,
@@ -974,7 +983,8 @@ class PredatorTradingAI:
             ask=snapshot.ask,
             open_trades=self.open_trade_count(),
             daily_loss_pct=self.daily_loss_pct(),
-            liquidity_score=liquidity_score,
+            liquidity_score=liquidity.score,
+            liquidity_status=liquidity.status,
             market_is_safe=regime.is_safe,
             ticker=setup.ticker,
             active_positions={**self.state.active_positions, **self.state.active_signals},
@@ -1151,13 +1161,13 @@ class PredatorTradingAI:
         return abs(pnl) / self.settings.paper_account_equity * 100
 
     @staticmethod
-    def estimate_liquidity_score(snapshot: MarketSnapshot, options_confirmation: Optional[dict]) -> float:
-        if options_confirmation:
-            return float(options_confirmation.get("liquidity_score", 0))
+    def estimate_liquidity_score(snapshot: MarketSnapshot, options_confirmation: Optional[dict]) -> LiquidityAssessment:
+        if options_confirmation and options_confirmation.get("liquidity_score") is not None:
+            return LiquidityAssessment(float(options_confirmation["liquidity_score"]), "PROVIDED_BY_OPTIONS_CONFIRMATION")
         spread = spread_pct(snapshot.bid, snapshot.ask)
         if spread == float("inf"):
-            return 0.0
-        return round(clamp(100 - (spread * 25), 0, 100), 2)
+            return LiquidityAssessment(None, "UNAVAILABLE")
+        return LiquidityAssessment(round(clamp(100 - (spread * 25), 0, 100), 2), "CALCULATED_FROM_SPREAD")
 
     def is_extreme_illiquidity(self, snapshot: MarketSnapshot) -> bool:
         spread = spread_pct(snapshot.bid, snapshot.ask)

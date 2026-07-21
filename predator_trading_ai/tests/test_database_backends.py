@@ -115,6 +115,7 @@ def test_sqlite_diagnostics_classification_and_quote_columns(tmp_path) -> None:
         "quote_timestamp",
         "evaluation_timestamp",
         "spread_percentage",
+        "liquidity_score_status",
         "quote_validity_status",
         "quote_validity_reasons",
     }

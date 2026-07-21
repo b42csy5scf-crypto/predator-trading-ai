@@ -158,6 +158,7 @@ class ProductionAuditReport:
                     f"Bid/Ask/Last: {fmt(bid)} / {fmt(ask)} / {fmt(last_price)}",
                     f"Midpoint: {fmt(midpoint)} Spread: {fmt_abs_spread(bid, ask)} ({fmt(spread_display)}%)",
                     f"Liquidity: {fmt(first_float(raw, 'liquidity_score', 'liquidity_score_at_evaluation'))} "
+                    f"Status: {raw.get('liquidity_score_status') or 'legacy/unavailable'} "
                     f"Volume: {fmt(first_float(raw, 'volume', 'entry_volume', 'raw_volume'))} "
                     f"RelVol: {fmt(first_float(raw, 'relative_volume', 'quote_relative_volume'))}",
                     f"Quote ts/age: {quote_ts or 'n/a'} / {seconds_label(quote_age)}",
@@ -224,6 +225,7 @@ class ProductionAuditReport:
                 "spread_absolute",
                 "spread_percentage",
                 "liquidity_score_at_evaluation",
+                "liquidity_score_status",
                 "raw_volume",
                 "quote_relative_volume",
                 "market_session_state",

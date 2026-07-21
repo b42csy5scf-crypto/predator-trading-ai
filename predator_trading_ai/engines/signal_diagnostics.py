@@ -68,7 +68,11 @@ class SignalDiagnosticsRecorder:
         open_positions_count: Optional[int] = None,
         open_positions_same_sector: Optional[int] = None,
         git_commit_hash: Optional[str] = None,
+        liquidity_score: Optional[float] = None,
+        liquidity_score_status: Optional[str] = None,
     ) -> None:
+        effective_liquidity_score = liquidity_score if liquidity_score is not None else signal.liquidity_score
+        effective_liquidity_status = liquidity_score_status or ("MEASURED" if effective_liquidity_score is not None else "UNAVAILABLE")
         self.record_accepted_setup(
             signal_id=signal_id,
             active_signal_id=active_signal_id,
@@ -83,6 +87,8 @@ class SignalDiagnosticsRecorder:
             open_positions_count=open_positions_count,
             open_positions_same_sector=open_positions_same_sector,
             git_commit_hash=git_commit_hash,
+            liquidity_score=effective_liquidity_score,
+            liquidity_score_status=effective_liquidity_status,
         )
         self.initialize_outcome_from_signal(active_signal_id, signal, setup.signal_tier, alert_type)
 
@@ -102,6 +108,8 @@ class SignalDiagnosticsRecorder:
         open_positions_count: Optional[int] = None,
         open_positions_same_sector: Optional[int] = None,
         git_commit_hash: Optional[str] = None,
+        liquidity_score: Optional[float] = None,
+        liquidity_score_status: Optional[str] = None,
     ) -> None:
         if setup.signal_tier not in self.TRADE_GRADES and alert_type != "experimental_watch":
             return
@@ -131,7 +139,8 @@ class SignalDiagnosticsRecorder:
             snapshot=snapshot,
             settings=settings,
             latest=bars.iloc[-1] if bars is not None and not bars.empty else None,
-            liquidity_score=None,
+            liquidity_score=liquidity_score,
+            liquidity_score_status=liquidity_score_status,
             force=True,
         )
         config_hash = self.record_config(settings) if settings is not None else None
@@ -253,6 +262,7 @@ class SignalDiagnosticsRecorder:
             settings=settings,
             latest=bars.iloc[-1] if bars is not None and not bars.empty else None,
             liquidity_score=getattr(risk_decision, "liquidity_score", None),
+            liquidity_score_status=getattr(risk_decision, "liquidity_status", None),
             force=risk_engine_reached,
         )
         self.db.insert_dict(
@@ -772,6 +782,7 @@ class SignalDiagnosticsRecorder:
         settings: Optional[Settings],
         latest: Any,
         liquidity_score: Optional[float],
+        liquidity_score_status: Optional[str],
         force: bool,
     ) -> dict[str, Any]:
         if snapshot is None:
@@ -814,6 +825,7 @@ class SignalDiagnosticsRecorder:
             "spread_percentage": None if spread == float("inf") else spread,
             "spread_formula_version": self.SPREAD_FORMULA_VERSION,
             "liquidity_score_at_evaluation": liquidity_score,
+            "liquidity_score_status": liquidity_score_status or ("MEASURED" if liquidity_score is not None else "UNAVAILABLE"),
             "raw_volume": getattr(snapshot, "volume", None),
             "quote_relative_volume": relative_volume,
             "market_session_state": session_state,

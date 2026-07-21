@@ -12,7 +12,8 @@ class RiskDecision:
     approved: bool
     position_size: float
     risk_reward: float
-    liquidity_score: float
+    liquidity_score: Optional[float]
+    liquidity_status: str
     reasons: list[str]
 
 
@@ -28,10 +29,11 @@ class RiskEngine:
         ask: Optional[float],
         open_trades: int,
         daily_loss_pct: float,
-        liquidity_score: float,
+        liquidity_score: Optional[float],
         market_is_safe: bool,
         ticker: Optional[str] = None,
         active_positions: Optional[dict] = None,
+        liquidity_status: str = "MEASURED",
     ) -> RiskDecision:
         reasons: list[str] = []
         entry = (setup.entry_zone_low + setup.entry_zone_high) / 2
@@ -50,7 +52,7 @@ class RiskEngine:
             reasons.append("max daily loss reached")
         if spread > self.settings.max_spread_pct:
             reasons.append(f"spread too wide: {spread:.2f}%")
-        if liquidity_score < self.settings.min_liquidity_score:
+        if liquidity_score is not None and liquidity_score < self.settings.min_liquidity_score:
             reasons.append(f"liquidity score too low: {liquidity_score:.0f}")
         min_confidence = min(self.settings.min_confidence, self.settings.min_score_a)
         if setup.score < min_confidence:
@@ -67,7 +69,8 @@ class RiskEngine:
             approved=len(reasons) == 0,
             position_size=round(max(position_size, 0), 4),
             risk_reward=round(risk_reward, 2),
-            liquidity_score=round(liquidity_score, 2),
+            liquidity_score=round(liquidity_score, 2) if liquidity_score is not None else None,
+            liquidity_status=liquidity_status,
             reasons=reasons,
         )
 

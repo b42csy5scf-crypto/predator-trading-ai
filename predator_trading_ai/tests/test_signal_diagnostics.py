@@ -42,6 +42,7 @@ class FakeRiskDecision:
     approved: bool = False
     reasons: tuple[str, ...] = ("spread too wide: 3.50%",)
     liquidity_score: float = 0.0
+    liquidity_status: str = "CALCULATED_FROM_SPREAD"
 
 
 def sample_bars() -> pd.DataFrame:
@@ -148,7 +149,10 @@ def test_accepted_signal_persistence(tmp_path) -> None:
         regime=sample_regime(),
         telegram_note="controlled breakout",
         settings=settings,
-        snapshot=FakeSnapshot(),
+        snapshot=FakeSnapshot(
+            timestamp=datetime.now(timezone.utc),
+            quote_timestamp=datetime.now(timezone.utc),
+        ),
         market_context={"VIX": 18.5},
         open_positions_count=1,
         open_positions_same_sector=1,
@@ -176,6 +180,8 @@ def test_accepted_signal_persistence(tmp_path) -> None:
     assert rows[0]["quote_source"] == "alpaca"
     assert rows[0]["feed_name"] == "IEX"
     assert rows[0]["feed_native_flag"] == 1
+    assert rows[0]["liquidity_score_at_evaluation"] == 90
+    assert rows[0]["liquidity_score_status"] == "MEASURED"
     assert rows[0]["quote_validity_status"] == "VALID"
     assert rows[0]["config_hash"]
     assert rows[0]["entry_open"] is not None
@@ -269,7 +275,12 @@ def test_rejected_candidate_risk_engine_quote_forensics(tmp_path) -> None:
         bars=sample_bars(),
         regime=sample_regime(),
         settings=settings,
-        snapshot=FakeSnapshot(bid=100.0, ask=104.0),
+        snapshot=FakeSnapshot(
+            bid=100.0,
+            ask=104.0,
+            timestamp=datetime.now(timezone.utc),
+            quote_timestamp=datetime.now(timezone.utc),
+        ),
         risk_decision=FakeRiskDecision(),
         risk_engine_reached=True,
     )
@@ -283,6 +294,7 @@ def test_rejected_candidate_risk_engine_quote_forensics(tmp_path) -> None:
     assert row["raw_ask"] == 104.0
     assert round(float(row["spread_percentage"]), 2) == 3.92
     assert row["liquidity_score_at_evaluation"] == 0.0
+    assert row["liquidity_score_status"] == "CALCULATED_FROM_SPREAD"
     assert row["quote_validity_status"] == "VALID"
 
 

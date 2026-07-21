@@ -22,7 +22,7 @@ class TradingSignal:
     confidence: float
     expected_win_rate: Optional[float]
     position_size: float
-    liquidity_score: float
+    liquidity_score: Optional[float]
     market_regime: str
     reason: str
     do_not_enter_conditions: list[str]

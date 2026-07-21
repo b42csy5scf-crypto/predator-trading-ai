@@ -103,6 +103,7 @@ def classification_and_quote_columns() -> dict[str, str]:
         "spread_percentage": "REAL",
         "spread_formula_version": "TEXT",
         "liquidity_score_at_evaluation": "REAL",
+        "liquidity_score_status": "TEXT",
         "raw_volume": "REAL",
         "quote_relative_volume": "REAL",
         "market_session_state": "TEXT",
