@@ -34,6 +34,7 @@ COMMANDS = (
     "/score_distribution",
     "/grade_trace",
     "/spread_forensics",
+    "/signal_forensics",
 )
 
 

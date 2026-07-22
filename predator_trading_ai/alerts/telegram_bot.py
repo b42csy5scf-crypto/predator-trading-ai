@@ -149,6 +149,7 @@ class TelegramAlertBot:
             "/score_distribution",
             "/grade_trace",
             "/spread_forensics",
+            "/signal_forensics",
             *research_commands,
         }:
             return
@@ -236,6 +237,23 @@ class TelegramAlertBot:
                 await bot.send_message(
                     chat_id=chat_id,
                     text="Spread forensics generated, but Telegram recipients are not configured.",
+                )
+            return
+        if command == "/signal_forensics":
+            ticker = args[0] if args else ""
+            limit = 3
+            if len(args) > 1:
+                try:
+                    limit = int(args[1])
+                except ValueError:
+                    limit = 3
+            from predator_trading_ai.reports.signal_forensics_runner import SignalForensicsRunner
+
+            result = await SignalForensicsRunner(self.settings, self.db).send_signal_forensics(ticker=ticker, limit=limit)
+            if not result.sent:
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text="Signal forensics generated, but Telegram recipients are not configured.",
                 )
             return
         if command in research_commands:
